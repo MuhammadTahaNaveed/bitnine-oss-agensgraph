@@ -6252,8 +6252,8 @@ getTables(Archive *fout, int *numTables)
 		appendPQExpBufferStr(query,
 							 "c.relrowsecurity, c.relforcerowsecurity, "
 							 "ag_label.labkind as labkind, "	/* is vlabel or elabel? */
-						  	 "ag_label.oid as laboid, "
-						  	 "ag_label.labid as labid, ");
+							 "ag_label.oid as laboid, "
+							 "ag_label.labid as labid, ");
 	else
 		appendPQExpBufferStr(query,
 							 "false AS relrowsecurity, "
@@ -18299,7 +18299,7 @@ dumpGraph(Archive *fout, const NamespaceInfo *graphinfo)
 
 	if (graphinfo->dobj.dump & DUMP_COMPONENT_ACL)
 		dumpACL(fout, graphinfo->dobj.dumpId, InvalidDumpId, "SCHEMA",
-				qnspname, NULL, graphinfo->dobj.namespace->dobj.name, 
+				qnspname, NULL, graphinfo->dobj.namespace->dobj.name,
 				graphinfo->rolname, &graphinfo->dacl);
 
 	free(qnspname);
