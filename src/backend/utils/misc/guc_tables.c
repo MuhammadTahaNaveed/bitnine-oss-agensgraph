@@ -2058,6 +2058,17 @@ struct config_bool ConfigureNamesBool[] =
 		NULL, NULL, NULL
 	},
 
+	{
+		{"enable_graph_dml", PGC_USERSET, CLIENT_CONN_STATEMENT,
+			gettext_noop("Allows using SQL DML queries on graph objects."),
+			NULL,
+			GUC_IS_NAME
+		},
+		&enableGraphDML,
+		false,
+		NULL, NULL, NULL
+	},
+
 	/* End-of-list marker */
 	{
 		{NULL, 0, 0, NULL, NULL}, NULL, false, NULL, NULL, NULL
