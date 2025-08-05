@@ -594,8 +594,11 @@ MATCH (A)-[r:el1 *1..3]->(B) RETURN A.id, r, B.id;
  1  | [el1[9.1][6.1,7.1]{}]                      | 2
  1  | [el1[9.1][6.1,7.1]{},el3[11.1][7.1,8.1]{}] | 3
  1  | [el2[10.1][6.1,8.1]{}]                     | 3
+ 1  | [el1[9.1][6.1,7.1]{}]                      | 2
+ 1  | [el1[9.1][6.1,7.1]{},el3[11.1][7.1,8.1]{}] | 3
+ 1  | [el2[10.1][6.1,8.1]{}]                     | 3
  2  | [el3[11.1][7.1,8.1]{}]                     | 3
-(4 rows)
+(7 rows)
 
 MATCH (A)-[r:el2 *1..3]->(B) RETURN A.id, r, B.id;
  id |           r            | id 
@@ -629,14 +632,19 @@ MATCH (A)<-[r:el1 *1..3]-(B) RETURN A.id, r, B.id;
  3  | [el2[10.1][6.1,8.1]{}]                     | 1
  3  | [el3[11.1][7.1,8.1]{}]                     | 2
  3  | [el3[11.1][7.1,8.1]{},el1[9.1][6.1,7.1]{}] | 1
-(4 rows)
+ 3  | [el2[10.1][6.1,8.1]{}]                     | 1
+ 3  | [el3[11.1][7.1,8.1]{}]                     | 2
+ 3  | [el3[11.1][7.1,8.1]{},el1[9.1][6.1,7.1]{}] | 1
+(7 rows)
 
 MATCH (A)<-[r:el2 *1..3]-(B) RETURN A.id, r, B.id;
  id |           r            | id 
 ----+------------------------+----
  3  | [el2[10.1][6.1,8.1]{}] | 1
  3  | [el3[11.1][7.1,8.1]{}] | 2
-(2 rows)
+ 3  | [el2[10.1][6.1,8.1]{}] | 1
+ 3  | [el3[11.1][7.1,8.1]{}] | 2
+(4 rows)
 
 MATCH (A)<-[r:el3 *1..3]-(B) RETURN A.id, r, B.id;
  id |           r            | id 
@@ -662,24 +670,42 @@ ORDER BY aid, bid, rid;
  aid |                                r                                | bid | rid  
 -----+-----------------------------------------------------------------+-----+------
  1   | [el1[9.1][6.1,7.1]{},el3[11.1][7.1,8.1]{},el2[10.1][6.1,8.1]{}] | 1   | 9.1
+ 1   | [el1[9.1][6.1,7.1]{},el3[11.1][7.1,8.1]{},el2[10.1][6.1,8.1]{}] | 1   | 9.1
+ 1   | [el2[10.1][6.1,8.1]{},el3[11.1][7.1,8.1]{},el1[9.1][6.1,7.1]{}] | 1   | 10.1
  1   | [el2[10.1][6.1,8.1]{},el3[11.1][7.1,8.1]{},el1[9.1][6.1,7.1]{}] | 1   | 10.1
  1   | [el1[9.1][6.1,7.1]{}]                                           | 2   | 9.1
+ 1   | [el1[9.1][6.1,7.1]{}]                                           | 2   | 9.1
+ 1   | [el2[10.1][6.1,8.1]{},el3[11.1][7.1,8.1]{}]                     | 2   | 10.1
  1   | [el2[10.1][6.1,8.1]{},el3[11.1][7.1,8.1]{}]                     | 2   | 10.1
  1   | [el1[9.1][6.1,7.1]{},el3[11.1][7.1,8.1]{}]                      | 3   | 9.1
+ 1   | [el1[9.1][6.1,7.1]{},el3[11.1][7.1,8.1]{}]                      | 3   | 9.1
+ 1   | [el2[10.1][6.1,8.1]{}]                                          | 3   | 10.1
  1   | [el2[10.1][6.1,8.1]{}]                                          | 3   | 10.1
  2   | [el1[9.1][6.1,7.1]{}]                                           | 1   | 9.1
+ 2   | [el1[9.1][6.1,7.1]{}]                                           | 1   | 9.1
+ 2   | [el3[11.1][7.1,8.1]{},el2[10.1][6.1,8.1]{}]                     | 1   | 11.1
  2   | [el3[11.1][7.1,8.1]{},el2[10.1][6.1,8.1]{}]                     | 1   | 11.1
  2   | [el1[9.1][6.1,7.1]{},el2[10.1][6.1,8.1]{},el3[11.1][7.1,8.1]{}] | 2   | 9.1
+ 2   | [el1[9.1][6.1,7.1]{},el2[10.1][6.1,8.1]{},el3[11.1][7.1,8.1]{}] | 2   | 9.1
+ 2   | [el3[11.1][7.1,8.1]{},el2[10.1][6.1,8.1]{},el1[9.1][6.1,7.1]{}] | 2   | 11.1
  2   | [el3[11.1][7.1,8.1]{},el2[10.1][6.1,8.1]{},el1[9.1][6.1,7.1]{}] | 2   | 11.1
  2   | [el1[9.1][6.1,7.1]{},el2[10.1][6.1,8.1]{}]                      | 3   | 9.1
+ 2   | [el1[9.1][6.1,7.1]{},el2[10.1][6.1,8.1]{}]                      | 3   | 9.1
+ 2   | [el3[11.1][7.1,8.1]{}]                                          | 3   | 11.1
  2   | [el3[11.1][7.1,8.1]{}]                                          | 3   | 11.1
  3   | [el2[10.1][6.1,8.1]{}]                                          | 1   | 10.1
+ 3   | [el2[10.1][6.1,8.1]{}]                                          | 1   | 10.1
+ 3   | [el3[11.1][7.1,8.1]{},el1[9.1][6.1,7.1]{}]                      | 1   | 11.1
  3   | [el3[11.1][7.1,8.1]{},el1[9.1][6.1,7.1]{}]                      | 1   | 11.1
  3   | [el2[10.1][6.1,8.1]{},el1[9.1][6.1,7.1]{}]                      | 2   | 10.1
+ 3   | [el2[10.1][6.1,8.1]{},el1[9.1][6.1,7.1]{}]                      | 2   | 10.1
+ 3   | [el3[11.1][7.1,8.1]{}]                                          | 2   | 11.1
  3   | [el3[11.1][7.1,8.1]{}]                                          | 2   | 11.1
  3   | [el2[10.1][6.1,8.1]{},el1[9.1][6.1,7.1]{},el3[11.1][7.1,8.1]{}] | 3   | 10.1
+ 3   | [el2[10.1][6.1,8.1]{},el1[9.1][6.1,7.1]{},el3[11.1][7.1,8.1]{}] | 3   | 10.1
  3   | [el3[11.1][7.1,8.1]{},el1[9.1][6.1,7.1]{},el2[10.1][6.1,8.1]{}] | 3   | 11.1
-(18 rows)
+ 3   | [el3[11.1][7.1,8.1]{},el1[9.1][6.1,7.1]{},el2[10.1][6.1,8.1]{}] | 3   | 11.1
+(36 rows)
 
 MATCH (A)-[r:el2 *1..3]-(B) RETURN A.id, r, B.id;
  id |                      r                      | id 
@@ -690,7 +716,9 @@ MATCH (A)-[r:el2 *1..3]-(B) RETURN A.id, r, B.id;
  2  | [el3[11.1][7.1,8.1]{},el2[10.1][6.1,8.1]{}] | 1
  3  | [el2[10.1][6.1,8.1]{}]                      | 1
  3  | [el3[11.1][7.1,8.1]{}]                      | 2
-(6 rows)
+ 3  | [el2[10.1][6.1,8.1]{}]                      | 1
+ 3  | [el3[11.1][7.1,8.1]{}]                      | 2
+(8 rows)
 
 MATCH (A)-[r:el3 *1..3]-(B) RETURN A.id, r, B.id;
  id |           r            | id 
@@ -1171,26 +1199,26 @@ RETURN properties(nodes(p)[0]) AS first, properties(vertices(p)[1]) AS second, p
 	   properties(nodes(p)[3]) AS fourth, properties(vertices(p)[4]) AS fifth, properties(vertices(p)[5]) AS sixth,
 	   length(edges(p))
 ORDER BY first, second, third, fourth, fifth, sixth;
-   first    |   second   |   third    |   fourth   |   fifth    | sixth | length 
-------------+------------+------------+------------+------------+-------+--------
- {"sec": 1} | {"sec": 2} | {"sec": 3} | {"sec": 4} | {"sec": 5} |       | 4
- {"sec": 1} | {"sec": 2} | {"sec": 3} | {"sec": 4} |            |       | 3
- {"sec": 1} | {"sec": 2} | {"sec": 3} |            |            |       | 2
- {"sec": 2} | {"sec": 3} | {"sec": 4} | {"sec": 5} | {"sec": 6} |       | 4
- {"sec": 2} | {"sec": 3} | {"sec": 4} | {"sec": 5} |            |       | 3
- {"sec": 2} | {"sec": 3} | {"sec": 4} |            |            |       | 2
- {"sec": 3} | {"sec": 4} | {"sec": 5} | {"sec": 6} | {"sec": 7} |       | 4
- {"sec": 3} | {"sec": 4} | {"sec": 5} | {"sec": 6} |            |       | 3
- {"sec": 3} | {"sec": 4} | {"sec": 5} |            |            |       | 2
- {"sec": 4} | {"sec": 5} | {"sec": 6} | {"sec": 7} | {"sec": 8} |       | 4
- {"sec": 4} | {"sec": 5} | {"sec": 6} | {"sec": 7} |            |       | 3
- {"sec": 4} | {"sec": 5} | {"sec": 6} |            |            |       | 2
- {"sec": 5} | {"sec": 6} | {"sec": 7} | {"sec": 8} | {"sec": 9} |       | 4
- {"sec": 5} | {"sec": 6} | {"sec": 7} | {"sec": 8} |            |       | 3
- {"sec": 5} | {"sec": 6} | {"sec": 7} |            |            |       | 2
- {"sec": 6} | {"sec": 7} | {"sec": 8} | {"sec": 9} |            |       | 3
- {"sec": 6} | {"sec": 7} | {"sec": 8} |            |            |       | 2
- {"sec": 7} | {"sec": 8} | {"sec": 9} |            |            |       | 2
+   first    |   second   | third | fourth | fifth | sixth | length 
+------------+------------+-------+--------+-------+-------+--------
+ {"sec": 1} | {"sec": 3} |       |        |       |       | 2
+ {"sec": 1} | {"sec": 4} |       |        |       |       | 3
+ {"sec": 1} | {"sec": 5} |       |        |       |       | 4
+ {"sec": 2} | {"sec": 4} |       |        |       |       | 2
+ {"sec": 2} | {"sec": 5} |       |        |       |       | 3
+ {"sec": 2} | {"sec": 6} |       |        |       |       | 4
+ {"sec": 3} | {"sec": 5} |       |        |       |       | 2
+ {"sec": 3} | {"sec": 6} |       |        |       |       | 3
+ {"sec": 3} | {"sec": 7} |       |        |       |       | 4
+ {"sec": 4} | {"sec": 6} |       |        |       |       | 2
+ {"sec": 4} | {"sec": 7} |       |        |       |       | 3
+ {"sec": 4} | {"sec": 8} |       |        |       |       | 4
+ {"sec": 5} | {"sec": 7} |       |        |       |       | 2
+ {"sec": 5} | {"sec": 8} |       |        |       |       | 3
+ {"sec": 5} | {"sec": 9} |       |        |       |       | 4
+ {"sec": 6} | {"sec": 8} |       |        |       |       | 2
+ {"sec": 6} | {"sec": 9} |       |        |       |       | 3
+ {"sec": 7} | {"sec": 9} |       |        |       |       | 2
 (18 rows)
 
 CREATE (:time {sec: 11})-[:goes {int: 1}]->
@@ -1234,7 +1262,10 @@ MATCH (a:person {id: 1})-[x:knows*1..2]->(b:person) RETURN a.id, b.id, x;
  1  | 2  | [knows[6.1][5.1,5.2]{}]
  1  | 3  | [knows[6.1][5.1,5.2]{},knows[6.2][5.2,5.3]{}]
  1  | 5  | [knows[6.4][5.1,5.5]{}]
-(3 rows)
+ 1  | 2  | [knows[6.1][5.1,5.2]{}]
+ 1  | 3  | [knows[6.1][5.1,5.2]{},knows[6.2][5.2,5.3]{}]
+ 1  | 5  | [knows[6.4][5.1,5.5]{}]
+(6 rows)
 
 -- 1<->2->3->4
 -- `->5
@@ -1244,10 +1275,14 @@ RETURN a.id as aid, b.id as bid, x ORDER BY aid, bid;
  aid | bid |                       x                       
 -----+-----+-----------------------------------------------
  1   | 1   | [knows[6.1][5.1,5.2]{},knows[6.5][5.2,5.1]{}]
+ 1   | 1   | [knows[6.1][5.1,5.2]{},knows[6.5][5.2,5.1]{}]
+ 1   | 2   | [knows[6.1][5.1,5.2]{}]
  1   | 2   | [knows[6.1][5.1,5.2]{}]
  1   | 3   | [knows[6.1][5.1,5.2]{},knows[6.2][5.2,5.3]{}]
+ 1   | 3   | [knows[6.1][5.1,5.2]{},knows[6.2][5.2,5.3]{}]
  1   | 5   | [knows[6.4][5.1,5.5]{}]
-(4 rows)
+ 1   | 5   | [knows[6.4][5.1,5.5]{}]
+(8 rows)
 
 MATCH (a:person {id: 1})-[x:knows*0..0]->(b:person) RETURN a.id, b.id, x;
  id | id | x  
@@ -1267,46 +1302,67 @@ MATCH (a:person {id: 1})-[x:knows*2..2]->(b:person) RETURN a.id as aid, b.id as 
  aid | bid |                       x                       
 -----+-----+-----------------------------------------------
  1   | 1   | [knows[6.1][5.1,5.2]{},knows[6.5][5.2,5.1]{}]
+ 1   | 1   | [knows[6.1][5.1,5.2]{},knows[6.5][5.2,5.1]{}]
  1   | 3   | [knows[6.1][5.1,5.2]{},knows[6.2][5.2,5.3]{}]
-(2 rows)
+ 1   | 3   | [knows[6.1][5.1,5.2]{},knows[6.2][5.2,5.3]{}]
+(4 rows)
 
 MATCH (a:person {id: 2})-[x:knows*1..1]->(b:person) RETURN a.id as aid, b.id as bid, x ORDER BY aid, bid;
  aid | bid |            x            
 -----+-----+-------------------------
  2   | 1   | [knows[6.5][5.2,5.1]{}]
+ 2   | 1   | [knows[6.5][5.2,5.1]{}]
  2   | 3   | [knows[6.2][5.2,5.3]{}]
-(2 rows)
+ 2   | 3   | [knows[6.2][5.2,5.3]{}]
+(4 rows)
 
 MATCH (a:person)-[x:knows*1..1]->(b:person)
 RETURN a.id as aid, b.id as bid, x, id(x[0]) as xid ORDER BY aid, bid, xid;
  aid | bid |            x            | xid 
 -----+-----+-------------------------+-----
  1   | 2   | [knows[6.1][5.1,5.2]{}] | 6.1
+ 1   | 2   | [knows[6.1][5.1,5.2]{}] | 6.1
+ 1   | 5   | [knows[6.4][5.1,5.5]{}] | 6.4
  1   | 5   | [knows[6.4][5.1,5.5]{}] | 6.4
  2   | 1   | [knows[6.5][5.2,5.1]{}] | 6.5
+ 2   | 1   | [knows[6.5][5.2,5.1]{}] | 6.5
+ 2   | 3   | [knows[6.2][5.2,5.3]{}] | 6.2
  2   | 3   | [knows[6.2][5.2,5.3]{}] | 6.2
  3   | 4   | [knows[6.3][5.3,5.4]{}] | 6.3
-(5 rows)
+(9 rows)
 
 MATCH (a:person)-[x:knows*]->(b:person)
 RETURN a.id as aid, b.id as bid, x, id(x[0]) as xid ORDER BY aid, bid, xid;
  aid | bid |                                             x                                             | xid 
 -----+-----+-------------------------------------------------------------------------------------------+-----
  1   | 1   | [knows[6.1][5.1,5.2]{},knows[6.5][5.2,5.1]{}]                                             | 6.1
+ 1   | 1   | [knows[6.1][5.1,5.2]{},knows[6.5][5.2,5.1]{}]                                             | 6.1
+ 1   | 2   | [knows[6.1][5.1,5.2]{}]                                                                   | 6.1
  1   | 2   | [knows[6.1][5.1,5.2]{}]                                                                   | 6.1
  1   | 3   | [knows[6.1][5.1,5.2]{},knows[6.2][5.2,5.3]{}]                                             | 6.1
+ 1   | 3   | [knows[6.1][5.1,5.2]{},knows[6.2][5.2,5.3]{}]                                             | 6.1
+ 1   | 4   | [knows[6.1][5.1,5.2]{},knows[6.2][5.2,5.3]{},knows[6.3][5.3,5.4]{}]                       | 6.1
  1   | 4   | [knows[6.1][5.1,5.2]{},knows[6.2][5.2,5.3]{},knows[6.3][5.3,5.4]{}]                       | 6.1
  1   | 5   | [knows[6.1][5.1,5.2]{},knows[6.5][5.2,5.1]{},knows[6.4][5.1,5.5]{}]                       | 6.1
+ 1   | 5   | [knows[6.1][5.1,5.2]{},knows[6.5][5.2,5.1]{},knows[6.4][5.1,5.5]{}]                       | 6.1
+ 1   | 5   | [knows[6.4][5.1,5.5]{}]                                                                   | 6.4
  1   | 5   | [knows[6.4][5.1,5.5]{}]                                                                   | 6.4
  2   | 1   | [knows[6.5][5.2,5.1]{}]                                                                   | 6.5
+ 2   | 1   | [knows[6.5][5.2,5.1]{}]                                                                   | 6.5
+ 2   | 2   | [knows[6.5][5.2,5.1]{},knows[6.1][5.1,5.2]{}]                                             | 6.5
  2   | 2   | [knows[6.5][5.2,5.1]{},knows[6.1][5.1,5.2]{}]                                             | 6.5
  2   | 3   | [knows[6.2][5.2,5.3]{}]                                                                   | 6.2
+ 2   | 3   | [knows[6.2][5.2,5.3]{}]                                                                   | 6.2
+ 2   | 3   | [knows[6.5][5.2,5.1]{},knows[6.1][5.1,5.2]{},knows[6.2][5.2,5.3]{}]                       | 6.5
  2   | 3   | [knows[6.5][5.2,5.1]{},knows[6.1][5.1,5.2]{},knows[6.2][5.2,5.3]{}]                       | 6.5
  2   | 4   | [knows[6.2][5.2,5.3]{},knows[6.3][5.3,5.4]{}]                                             | 6.2
+ 2   | 4   | [knows[6.2][5.2,5.3]{},knows[6.3][5.3,5.4]{}]                                             | 6.2
+ 2   | 4   | [knows[6.5][5.2,5.1]{},knows[6.1][5.1,5.2]{},knows[6.2][5.2,5.3]{},knows[6.3][5.3,5.4]{}] | 6.5
  2   | 4   | [knows[6.5][5.2,5.1]{},knows[6.1][5.1,5.2]{},knows[6.2][5.2,5.3]{},knows[6.3][5.3,5.4]{}] | 6.5
  2   | 5   | [knows[6.5][5.2,5.1]{},knows[6.4][5.1,5.5]{}]                                             | 6.5
+ 2   | 5   | [knows[6.5][5.2,5.1]{},knows[6.4][5.1,5.5]{}]                                             | 6.5
  3   | 4   | [knows[6.3][5.3,5.4]{}]                                                                   | 6.3
-(14 rows)
+(27 rows)
 
 MATCH (a:person {id: 1})-[x:knows*0..3]->(b:person)
 RETURN a.id as aid, b.id as bid, x
@@ -1327,13 +1383,27 @@ RETURN a.id as aid, b.id as bid, x, id(x[0]) as xid ORDER BY aid, bid, xid;
  aid | bid |                       x                       | xid 
 -----+-----+-----------------------------------------------+-----
  1   | 1   | [knows[6.1][5.1,5.2]{},knows[6.5][5.2,5.1]{}] | 6.1
+ 1   | 1   | [knows[6.1][5.1,5.2]{},knows[6.5][5.2,5.1]{}] | 6.1
+ 1   | 1   | [knows[6.1][5.1,5.2]{},knows[6.5][5.2,5.1]{}] | 6.1
+ 1   | 1   | [knows[6.5][5.2,5.1]{},knows[6.1][5.1,5.2]{}] | 6.5
+ 1   | 1   | [knows[6.5][5.2,5.1]{},knows[6.1][5.1,5.2]{}] | 6.5
  1   | 1   | [knows[6.5][5.2,5.1]{},knows[6.1][5.1,5.2]{}] | 6.5
  1   | 2   | [knows[6.1][5.1,5.2]{}]                       | 6.1
+ 1   | 2   | [knows[6.1][5.1,5.2]{}]                       | 6.1
+ 1   | 2   | [knows[6.1][5.1,5.2]{}]                       | 6.1
+ 1   | 2   | [knows[6.5][5.2,5.1]{}]                       | 6.5
+ 1   | 2   | [knows[6.5][5.2,5.1]{}]                       | 6.5
  1   | 2   | [knows[6.5][5.2,5.1]{}]                       | 6.5
  1   | 3   | [knows[6.1][5.1,5.2]{},knows[6.2][5.2,5.3]{}] | 6.1
+ 1   | 3   | [knows[6.1][5.1,5.2]{},knows[6.2][5.2,5.3]{}] | 6.1
+ 1   | 3   | [knows[6.1][5.1,5.2]{},knows[6.2][5.2,5.3]{}] | 6.1
+ 1   | 3   | [knows[6.5][5.2,5.1]{},knows[6.2][5.2,5.3]{}] | 6.5
+ 1   | 3   | [knows[6.5][5.2,5.1]{},knows[6.2][5.2,5.3]{}] | 6.5
  1   | 3   | [knows[6.5][5.2,5.1]{},knows[6.2][5.2,5.3]{}] | 6.5
  1   | 5   | [knows[6.4][5.1,5.5]{}]                       | 6.4
-(7 rows)
+ 1   | 5   | [knows[6.4][5.1,5.5]{}]                       | 6.4
+ 1   | 5   | [knows[6.4][5.1,5.5]{}]                       | 6.4
+(21 rows)
 
 -- 1->2->3->4
 -- `->5
@@ -1347,12 +1417,18 @@ RETURN a.id as aid, b.id as bid, x, id(x[0]) as xid ORDER BY aid, bid, xid;
  aid | bid |                                             x                                             | xid 
 -----+-----+-------------------------------------------------------------------------------------------+-----
  1   | 1   | [knows[6.1][5.1,5.2]{},knows[6.2][5.2,5.3]{},knows[6.6][5.3,5.1]{}]                       | 6.1
+ 1   | 1   | [knows[6.1][5.1,5.2]{},knows[6.2][5.2,5.3]{},knows[6.6][5.3,5.1]{}]                       | 6.1
+ 1   | 2   | [knows[6.1][5.1,5.2]{}]                                                                   | 6.1
  1   | 2   | [knows[6.1][5.1,5.2]{}]                                                                   | 6.1
  1   | 3   | [knows[6.1][5.1,5.2]{},knows[6.2][5.2,5.3]{}]                                             | 6.1
+ 1   | 3   | [knows[6.1][5.1,5.2]{},knows[6.2][5.2,5.3]{}]                                             | 6.1
+ 1   | 4   | [knows[6.1][5.1,5.2]{},knows[6.2][5.2,5.3]{},knows[6.3][5.3,5.4]{}]                       | 6.1
  1   | 4   | [knows[6.1][5.1,5.2]{},knows[6.2][5.2,5.3]{},knows[6.3][5.3,5.4]{}]                       | 6.1
  1   | 5   | [knows[6.1][5.1,5.2]{},knows[6.2][5.2,5.3]{},knows[6.6][5.3,5.1]{},knows[6.4][5.1,5.5]{}] | 6.1
+ 1   | 5   | [knows[6.1][5.1,5.2]{},knows[6.2][5.2,5.3]{},knows[6.6][5.3,5.1]{},knows[6.4][5.1,5.5]{}] | 6.1
  1   | 5   | [knows[6.4][5.1,5.5]{}]                                                                   | 6.4
-(6 rows)
+ 1   | 5   | [knows[6.4][5.1,5.5]{}]                                                                   | 6.4
+(12 rows)
 
 -- 1->2->3->4
 -- `->5
@@ -1367,7 +1443,10 @@ RETURN a.id, b.id, x[0].fromdate;
  1  | 2  | 
  1  | 3  | 
  1  | 5  | "2014-11-24"
-(3 rows)
+ 1  | 2  | 
+ 1  | 3  | 
+ 1  | 5  | "2014-11-24"
+(6 rows)
 
 MATCH (a:person {id: 1})-[x:knows*1..2]->(b:person)
 WHERE x[0].fromdate IS NOT NULL
@@ -1375,7 +1454,8 @@ RETURN a.id, b.id, x[0].fromdate;
  id | id |   fromdate   
 ----+----+--------------
  1  | 5  | "2014-11-24"
-(1 row)
+ 1  | 5  | "2014-11-24"
+(2 rows)
 
 MATCH (a:person {id: 1})-[x:knows*1..2]->(b:person)
 WITH x[0].fromdate AS fromdate
@@ -1385,7 +1465,10 @@ RETURN fromdate;
  
  
  "2014-11-24"
-(3 rows)
+ 
+ 
+ "2014-11-24"
+(6 rows)
 
 MATCH (a:person {id: 1})-[x:knows*1..2]->(b:person)
 WITH x[0] AS x1
@@ -1395,7 +1478,10 @@ RETURN x1.fromdate, x1;
               | knows[6.1][5.1,5.2]{}
               | knows[6.1][5.1,5.2]{}
  "2014-11-24" | friendships[7.1][5.1,5.6]{"fromdate": "2014-11-24"}
-(3 rows)
+              | knows[6.1][5.1,5.2]{}
+              | knows[6.1][5.1,5.2]{}
+ "2014-11-24" | friendships[7.1][5.1,5.6]{"fromdate": "2014-11-24"}
+(6 rows)
 
 MATCH (a:person {id: 1})-[x:knows*1..2]->(b:person)
 WHERE x[1].fromdate IS NOT NULL
@@ -1413,7 +1499,10 @@ RETURN x1, l;
  knows[6.1][5.1,5.2]{}                               | 1
  knows[6.1][5.1,5.2]{}                               | 2
  friendships[7.1][5.1,5.6]{"fromdate": "2014-11-24"} | 1
-(3 rows)
+ knows[6.1][5.1,5.2]{}                               | 1
+ knows[6.1][5.1,5.2]{}                               | 2
+ friendships[7.1][5.1,5.6]{"fromdate": "2014-11-24"} | 1
+(6 rows)
 
 MATCH (a:person {id: 1})-[x:knows*1..2]-(b:person)
 WITH x[0] AS x1, length(x) AS l
@@ -1421,9 +1510,12 @@ RETURN x1, l;
                          x1                          | l 
 -----------------------------------------------------+---
  knows[6.1][5.1,5.2]{}                               | 1
+ knows[6.1][5.1,5.2]{}                               | 1
+ knows[6.1][5.1,5.2]{}                               | 2
  knows[6.1][5.1,5.2]{}                               | 2
  friendships[7.1][5.1,5.6]{"fromdate": "2014-11-24"} | 1
-(3 rows)
+ friendships[7.1][5.1,5.6]{"fromdate": "2014-11-24"} | 1
+(6 rows)
 
 CREATE ELABEL familyship INHERITS (friendships);
 MATCH (a:person {id: 5}) CREATE (a)-[:familyship {fromdate: '2015-12-24'}]->(:person {id: 6});
@@ -1433,48 +1525,61 @@ RETURN x1, x2, l;
                          x1                          |                         x2                         | l 
 -----------------------------------------------------+----------------------------------------------------+---
  knows[6.1][5.1,5.2]{}                               |                                                    | 1
+ knows[6.1][5.1,5.2]{}                               |                                                    | 1
+ knows[6.1][5.1,5.2]{}                               | knows[6.2][5.2,5.3]{}                              | 2
  knows[6.1][5.1,5.2]{}                               | knows[6.2][5.2,5.3]{}                              | 2
  friendships[7.1][5.1,5.6]{"fromdate": "2014-11-24"} |                                                    | 1
+ friendships[7.1][5.1,5.6]{"fromdate": "2014-11-24"} |                                                    | 1
  friendships[7.1][5.1,5.6]{"fromdate": "2014-11-24"} | familyship[8.2][5.6,5.8]{"fromdate": "2015-12-24"} | 2
-(4 rows)
+ friendships[7.1][5.1,5.6]{"fromdate": "2014-11-24"} | familyship[8.2][5.6,5.8]{"fromdate": "2015-12-24"} | 2
+(8 rows)
 
 EXPLAIN (VERBOSE, COSTS OFF)
 MATCH (a:person {id: 1})-[x:knows*1..2]->(b:person)
 WITH x[0] AS x1, x[1] AS x2 ORDER BY x2 RETURN x1;
-                                               QUERY PLAN                                                
----------------------------------------------------------------------------------------------------------
+                                                                    QUERY PLAN                                                                     
+---------------------------------------------------------------------------------------------------------------------------------------------------
  Subquery Scan on _agens_default_s
    Output: _agens_default_s.x1
    ->  Sort
          Output: (x.edges[1]), (x.edges[2])
          Sort Key: (x.edges[2])
-         ->  Nested Loop
+         ->  Hash Join
                Output: x.edges[1], x.edges[2]
-               Inner Unique: true
-               ->  Nested Loop
+               Hash Cond: (b.id = x."end")
+               ->  Seq Scan on t.person b
+                     Output: b.id, b.properties
+               ->  Hash
                      Output: x.edges, x."end"
-                     ->  Seq Scan on t.person a
-                           Output: a.id, a.properties
-                           Filter: (a.properties.'id'::text = '1'::jsonb)
-                     ->  Subquery Scan on x
-                           Output: x.start, x."end", x.ids, x.edges, x.vertices
-                           ->  Graph VLE [1..2]
-                                 ->  Result
-                                       Output: a.id, a.id, '{}'::graphid[], '[]'::edge[], '[]'::vertex[]
-               ->  Memoize
-                     Output: b.id
-                     Cache Key: x."end"
-                     Cache Mode: logical
-                     ->  Index Only Scan using person_pkey on t.person b
-                           Output: b.id
-                           Index Cond: (b.id = x."end")
-(25 rows)
+                     ->  Nested Loop
+                           Output: x.edges, x."end"
+                           ->  Seq Scan on t.person a
+                                 Output: a.id, a.properties
+                                 Filter: (a.properties.'id'::text = '1'::jsonb)
+                           ->  Subquery Scan on x
+                                 Output: x.start, x."end", x.ids, x.edges, x.vertices
+                                 ->  Graph VLE [1..2]
+                                       ->  Result
+                                             Output: start, "end", ARRAY[id], ARRAY[ROW(id, start, "end", properties, ctid)::edge], NULL::vertex[]
+                                             ->  Append
+                                                   ->  Seq Scan on t.knows
+                                                         Output: start, "end", id, properties, ctid
+                                                         Filter: (a.id = start)
+                                                   ->  Seq Scan on t.friendships
+                                                         Output: start, "end", id, properties, ctid
+                                                         Filter: (a.id = start)
+                                                   ->  Bitmap Heap Scan on t.familyship friendships
+                                                         Output: start, "end", id, properties, ctid
+                                                         Recheck Cond: (a.id = start)
+                                                         ->  Bitmap Index Scan on familyship_start_idx
+                                                               Index Cond: (start = a.id)
+(34 rows)
 
 EXPLAIN (VERBOSE, COSTS OFF)
 MATCH (a:person {id: 1})-[x:knows*1..2]->(b:person)
 WITH max(b.id::"numeric") AS id, x[0] AS x RETURN *;
-                                                  QUERY PLAN                                                   
----------------------------------------------------------------------------------------------------------------
+                                                                       QUERY PLAN                                                                        
+---------------------------------------------------------------------------------------------------------------------------------------------------------
  Subquery Scan on _agens_default_s
    Output: cypher_to_jsonb(_agens_default_s.id), _agens_default_s.x
    ->  GroupAggregate
@@ -1483,9 +1588,55 @@ WITH max(b.id::"numeric") AS id, x[0] AS x RETURN *;
          ->  Sort
                Output: (x.edges[1]), b.properties
                Sort Key: (x.edges[1])
-               ->  Nested Loop
+               ->  Hash Join
                      Output: x.edges[1], b.properties
-                     Inner Unique: true
+                     Hash Cond: (b.id = x."end")
+                     ->  Seq Scan on t.person b
+                           Output: b.id, b.properties
+                     ->  Hash
+                           Output: x.edges, x."end"
+                           ->  Nested Loop
+                                 Output: x.edges, x."end"
+                                 ->  Seq Scan on t.person a
+                                       Output: a.id, a.properties
+                                       Filter: (a.properties.'id'::text = '1'::jsonb)
+                                 ->  Subquery Scan on x
+                                       Output: x.start, x."end", x.ids, x.edges, x.vertices
+                                       ->  Graph VLE [1..2]
+                                             ->  Result
+                                                   Output: start, "end", ARRAY[id], ARRAY[ROW(id, start, "end", properties, ctid)::edge], NULL::vertex[]
+                                                   ->  Append
+                                                         ->  Seq Scan on t.knows
+                                                               Output: start, "end", id, properties, ctid
+                                                               Filter: (a.id = start)
+                                                         ->  Seq Scan on t.friendships
+                                                               Output: start, "end", id, properties, ctid
+                                                               Filter: (a.id = start)
+                                                         ->  Bitmap Heap Scan on t.familyship friendships
+                                                               Output: start, "end", id, properties, ctid
+                                                               Recheck Cond: (a.id = start)
+                                                               ->  Bitmap Index Scan on familyship_start_idx
+                                                                     Index Cond: (start = a.id)
+(37 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF)
+MATCH (a:person {id: 1})-[x:knows*1..2]->(b:person)
+WITH max(b.id) AS id, x[0] AS x RETURN *;
+                                                                    QUERY PLAN                                                                     
+---------------------------------------------------------------------------------------------------------------------------------------------------
+ GroupAggregate
+   Output: max(b.properties.'id'::text), (x.edges[1])
+   Group Key: (x.edges[1])
+   ->  Sort
+         Output: (x.edges[1]), b.properties
+         Sort Key: (x.edges[1])
+         ->  Hash Join
+               Output: x.edges[1], b.properties
+               Hash Cond: (b.id = x."end")
+               ->  Seq Scan on t.person b
+                     Output: b.id, b.properties
+               ->  Hash
+                     Output: x.edges, x."end"
                      ->  Nested Loop
                            Output: x.edges, x."end"
                            ->  Seq Scan on t.person a
@@ -1495,86 +1646,67 @@ WITH max(b.id::"numeric") AS id, x[0] AS x RETURN *;
                                  Output: x.start, x."end", x.ids, x.edges, x.vertices
                                  ->  Graph VLE [1..2]
                                        ->  Result
-                                             Output: a.id, a.id, '{}'::graphid[], '[]'::edge[], '[]'::vertex[]
-                     ->  Memoize
-                           Output: b.properties, b.id
-                           Cache Key: x."end"
-                           Cache Mode: logical
-                           ->  Index Scan using person_pkey on t.person b
-                                 Output: b.properties, b.id
-                                 Index Cond: (b.id = x."end")
-(28 rows)
-
-EXPLAIN (VERBOSE, COSTS OFF)
-MATCH (a:person {id: 1})-[x:knows*1..2]->(b:person)
-WITH max(b.id) AS id, x[0] AS x RETURN *;
-                                               QUERY PLAN                                                
----------------------------------------------------------------------------------------------------------
- GroupAggregate
-   Output: max(b.properties.'id'::text), (x.edges[1])
-   Group Key: (x.edges[1])
-   ->  Sort
-         Output: (x.edges[1]), b.properties
-         Sort Key: (x.edges[1])
-         ->  Nested Loop
-               Output: x.edges[1], b.properties
-               Inner Unique: true
-               ->  Nested Loop
-                     Output: x.edges, x."end"
-                     ->  Seq Scan on t.person a
-                           Output: a.id, a.properties
-                           Filter: (a.properties.'id'::text = '1'::jsonb)
-                     ->  Subquery Scan on x
-                           Output: x.start, x."end", x.ids, x.edges, x.vertices
-                           ->  Graph VLE [1..2]
-                                 ->  Result
-                                       Output: a.id, a.id, '{}'::graphid[], '[]'::edge[], '[]'::vertex[]
-               ->  Memoize
-                     Output: b.properties, b.id
-                     Cache Key: x."end"
-                     Cache Mode: logical
-                     ->  Index Scan using person_pkey on t.person b
-                           Output: b.properties, b.id
-                           Index Cond: (b.id = x."end")
-(26 rows)
+                                             Output: start, "end", ARRAY[id], ARRAY[ROW(id, start, "end", properties, ctid)::edge], NULL::vertex[]
+                                             ->  Append
+                                                   ->  Seq Scan on t.knows
+                                                         Output: start, "end", id, properties, ctid
+                                                         Filter: (a.id = start)
+                                                   ->  Seq Scan on t.friendships
+                                                         Output: start, "end", id, properties, ctid
+                                                         Filter: (a.id = start)
+                                                   ->  Bitmap Heap Scan on t.familyship friendships
+                                                         Output: start, "end", id, properties, ctid
+                                                         Recheck Cond: (a.id = start)
+                                                         ->  Bitmap Index Scan on familyship_start_idx
+                                                               Index Cond: (start = a.id)
+(35 rows)
 
 EXPLAIN (VERBOSE, COSTS OFF)
 MATCH (a:person {id: 1})-[x:knows*1..2]->(b:person)
 WITH DISTINCT x AS path RETURN *;
-                                               QUERY PLAN                                                
----------------------------------------------------------------------------------------------------------
+                                                                    QUERY PLAN                                                                     
+---------------------------------------------------------------------------------------------------------------------------------------------------
  Unique
    Output: x.edges
    ->  Sort
          Output: x.edges
          Sort Key: x.edges
-         ->  Nested Loop
+         ->  Hash Join
                Output: x.edges
-               Inner Unique: true
-               ->  Nested Loop
+               Hash Cond: (b.id = x."end")
+               ->  Seq Scan on t.person b
+                     Output: b.id, b.properties
+               ->  Hash
                      Output: x.edges, x."end"
-                     ->  Seq Scan on t.person a
-                           Output: a.id, a.properties
-                           Filter: (a.properties.'id'::text = '1'::jsonb)
-                     ->  Subquery Scan on x
-                           Output: x.start, x."end", x.ids, x.edges, x.vertices
-                           ->  Graph VLE [1..2]
-                                 ->  Result
-                                       Output: a.id, a.id, '{}'::graphid[], '[]'::edge[], '[]'::vertex[]
-               ->  Memoize
-                     Output: b.id
-                     Cache Key: x."end"
-                     Cache Mode: logical
-                     ->  Index Only Scan using person_pkey on t.person b
-                           Output: b.id
-                           Index Cond: (b.id = x."end")
-(25 rows)
+                     ->  Nested Loop
+                           Output: x.edges, x."end"
+                           ->  Seq Scan on t.person a
+                                 Output: a.id, a.properties
+                                 Filter: (a.properties.'id'::text = '1'::jsonb)
+                           ->  Subquery Scan on x
+                                 Output: x.start, x."end", x.ids, x.edges, x.vertices
+                                 ->  Graph VLE [1..2]
+                                       ->  Result
+                                             Output: start, "end", ARRAY[id], ARRAY[ROW(id, start, "end", properties, ctid)::edge], NULL::vertex[]
+                                             ->  Append
+                                                   ->  Seq Scan on t.knows
+                                                         Output: start, "end", id, properties, ctid
+                                                         Filter: (a.id = start)
+                                                   ->  Seq Scan on t.friendships
+                                                         Output: start, "end", id, properties, ctid
+                                                         Filter: (a.id = start)
+                                                   ->  Bitmap Heap Scan on t.familyship friendships
+                                                         Output: start, "end", id, properties, ctid
+                                                         Recheck Cond: (a.id = start)
+                                                         ->  Bitmap Index Scan on familyship_start_idx
+                                                               Index Cond: (start = a.id)
+(34 rows)
 
 EXPLAIN (VERBOSE, COSTS OFF)
 MATCH (a:person {id: 1})-[x:knows*1..2]->(b:person)
 WITH max(b.id::"numeric") AS id, x AS x RETURN *;
-                                                  QUERY PLAN                                                   
----------------------------------------------------------------------------------------------------------------
+                                                                       QUERY PLAN                                                                        
+---------------------------------------------------------------------------------------------------------------------------------------------------------
  Subquery Scan on _agens_default_s
    Output: cypher_to_jsonb(_agens_default_s.id), _agens_default_s.x
    ->  GroupAggregate
@@ -1583,9 +1715,55 @@ WITH max(b.id::"numeric") AS id, x AS x RETURN *;
          ->  Sort
                Output: x.edges, b.properties
                Sort Key: x.edges
-               ->  Nested Loop
+               ->  Hash Join
                      Output: x.edges, b.properties
-                     Inner Unique: true
+                     Hash Cond: (b.id = x."end")
+                     ->  Seq Scan on t.person b
+                           Output: b.id, b.properties
+                     ->  Hash
+                           Output: x.edges, x."end"
+                           ->  Nested Loop
+                                 Output: x.edges, x."end"
+                                 ->  Seq Scan on t.person a
+                                       Output: a.id, a.properties
+                                       Filter: (a.properties.'id'::text = '1'::jsonb)
+                                 ->  Subquery Scan on x
+                                       Output: x.start, x."end", x.ids, x.edges, x.vertices
+                                       ->  Graph VLE [1..2]
+                                             ->  Result
+                                                   Output: start, "end", ARRAY[id], ARRAY[ROW(id, start, "end", properties, ctid)::edge], NULL::vertex[]
+                                                   ->  Append
+                                                         ->  Seq Scan on t.knows
+                                                               Output: start, "end", id, properties, ctid
+                                                               Filter: (a.id = start)
+                                                         ->  Seq Scan on t.friendships
+                                                               Output: start, "end", id, properties, ctid
+                                                               Filter: (a.id = start)
+                                                         ->  Bitmap Heap Scan on t.familyship friendships
+                                                               Output: start, "end", id, properties, ctid
+                                                               Recheck Cond: (a.id = start)
+                                                               ->  Bitmap Index Scan on familyship_start_idx
+                                                                     Index Cond: (start = a.id)
+(37 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF)
+MATCH (a:person {id: 1})-[x:knows*1..2]->(b:person)
+WITH max(b.id) AS id, x AS x RETURN *;
+                                                                    QUERY PLAN                                                                     
+---------------------------------------------------------------------------------------------------------------------------------------------------
+ GroupAggregate
+   Output: max(b.properties.'id'::text), x.edges
+   Group Key: x.edges
+   ->  Sort
+         Output: x.edges, b.properties
+         Sort Key: x.edges
+         ->  Hash Join
+               Output: x.edges, b.properties
+               Hash Cond: (b.id = x."end")
+               ->  Seq Scan on t.person b
+                     Output: b.id, b.properties
+               ->  Hash
+                     Output: x.edges, x."end"
                      ->  Nested Loop
                            Output: x.edges, x."end"
                            ->  Seq Scan on t.person a
@@ -1595,54 +1773,26 @@ WITH max(b.id::"numeric") AS id, x AS x RETURN *;
                                  Output: x.start, x."end", x.ids, x.edges, x.vertices
                                  ->  Graph VLE [1..2]
                                        ->  Result
-                                             Output: a.id, a.id, '{}'::graphid[], '[]'::edge[], '[]'::vertex[]
-                     ->  Memoize
-                           Output: b.properties, b.id
-                           Cache Key: x."end"
-                           Cache Mode: logical
-                           ->  Index Scan using person_pkey on t.person b
-                                 Output: b.properties, b.id
-                                 Index Cond: (b.id = x."end")
-(28 rows)
-
-EXPLAIN (VERBOSE, COSTS OFF)
-MATCH (a:person {id: 1})-[x:knows*1..2]->(b:person)
-WITH max(b.id) AS id, x AS x RETURN *;
-                                               QUERY PLAN                                                
----------------------------------------------------------------------------------------------------------
- GroupAggregate
-   Output: max(b.properties.'id'::text), x.edges
-   Group Key: x.edges
-   ->  Sort
-         Output: x.edges, b.properties
-         Sort Key: x.edges
-         ->  Nested Loop
-               Output: x.edges, b.properties
-               Inner Unique: true
-               ->  Nested Loop
-                     Output: x.edges, x."end"
-                     ->  Seq Scan on t.person a
-                           Output: a.id, a.properties
-                           Filter: (a.properties.'id'::text = '1'::jsonb)
-                     ->  Subquery Scan on x
-                           Output: x.start, x."end", x.ids, x.edges, x.vertices
-                           ->  Graph VLE [1..2]
-                                 ->  Result
-                                       Output: a.id, a.id, '{}'::graphid[], '[]'::edge[], '[]'::vertex[]
-               ->  Memoize
-                     Output: b.properties, b.id
-                     Cache Key: x."end"
-                     Cache Mode: logical
-                     ->  Index Scan using person_pkey on t.person b
-                           Output: b.properties, b.id
-                           Index Cond: (b.id = x."end")
-(26 rows)
+                                             Output: start, "end", ARRAY[id], ARRAY[ROW(id, start, "end", properties, ctid)::edge], NULL::vertex[]
+                                             ->  Append
+                                                   ->  Seq Scan on t.knows
+                                                         Output: start, "end", id, properties, ctid
+                                                         Filter: (a.id = start)
+                                                   ->  Seq Scan on t.friendships
+                                                         Output: start, "end", id, properties, ctid
+                                                         Filter: (a.id = start)
+                                                   ->  Bitmap Heap Scan on t.familyship friendships
+                                                         Output: start, "end", id, properties, ctid
+                                                         Recheck Cond: (a.id = start)
+                                                         ->  Bitmap Index Scan on familyship_start_idx
+                                                               Index Cond: (start = a.id)
+(35 rows)
 
 EXPLAIN (VERBOSE, COSTS OFF)
 MATCH (a:person {id: 1})-[x:knows*1..2]->(b:person)
 WITH max(length(x)::"numeric") AS x, b.id AS id RETURN *;
-                                                  QUERY PLAN                                                   
----------------------------------------------------------------------------------------------------------------
+                                                                       QUERY PLAN                                                                        
+---------------------------------------------------------------------------------------------------------------------------------------------------------
  Subquery Scan on _agens_default_s
    Output: cypher_to_jsonb(_agens_default_s.x), _agens_default_s.id
    ->  GroupAggregate
@@ -1651,9 +1801,55 @@ WITH max(length(x)::"numeric") AS x, b.id AS id RETURN *;
          ->  Sort
                Output: (b.properties.'id'::text), x.edges
                Sort Key: (b.properties.'id'::text)
-               ->  Nested Loop
+               ->  Hash Join
                      Output: b.properties.'id'::text, x.edges
-                     Inner Unique: true
+                     Hash Cond: (b.id = x."end")
+                     ->  Seq Scan on t.person b
+                           Output: b.id, b.properties
+                     ->  Hash
+                           Output: x.edges, x."end"
+                           ->  Nested Loop
+                                 Output: x.edges, x."end"
+                                 ->  Seq Scan on t.person a
+                                       Output: a.id, a.properties
+                                       Filter: (a.properties.'id'::text = '1'::jsonb)
+                                 ->  Subquery Scan on x
+                                       Output: x.start, x."end", x.ids, x.edges, x.vertices
+                                       ->  Graph VLE [1..2]
+                                             ->  Result
+                                                   Output: start, "end", ARRAY[id], ARRAY[ROW(id, start, "end", properties, ctid)::edge], NULL::vertex[]
+                                                   ->  Append
+                                                         ->  Seq Scan on t.knows
+                                                               Output: start, "end", id, properties, ctid
+                                                               Filter: (a.id = start)
+                                                         ->  Seq Scan on t.friendships
+                                                               Output: start, "end", id, properties, ctid
+                                                               Filter: (a.id = start)
+                                                         ->  Bitmap Heap Scan on t.familyship friendships
+                                                               Output: start, "end", id, properties, ctid
+                                                               Recheck Cond: (a.id = start)
+                                                               ->  Bitmap Index Scan on familyship_start_idx
+                                                                     Index Cond: (start = a.id)
+(37 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF)
+MATCH (a:person {id: 1})-[x:knows*1..2]->(b:person)
+WITH max(length(x)) AS x, b.id AS id RETURN *;
+                                                                    QUERY PLAN                                                                     
+---------------------------------------------------------------------------------------------------------------------------------------------------
+ GroupAggregate
+   Output: max(length(x.edges)), (b.properties.'id'::text)
+   Group Key: (b.properties.'id'::text)
+   ->  Sort
+         Output: (b.properties.'id'::text), x.edges
+         Sort Key: (b.properties.'id'::text)
+         ->  Hash Join
+               Output: b.properties.'id'::text, x.edges
+               Hash Cond: (b.id = x."end")
+               ->  Seq Scan on t.person b
+                     Output: b.id, b.properties
+               ->  Hash
+                     Output: x.edges, x."end"
                      ->  Nested Loop
                            Output: x.edges, x."end"
                            ->  Seq Scan on t.person a
@@ -1663,118 +1859,69 @@ WITH max(length(x)::"numeric") AS x, b.id AS id RETURN *;
                                  Output: x.start, x."end", x.ids, x.edges, x.vertices
                                  ->  Graph VLE [1..2]
                                        ->  Result
-                                             Output: a.id, a.id, '{}'::graphid[], '[]'::edge[], '[]'::vertex[]
-                     ->  Memoize
-                           Output: b.properties, b.id
-                           Cache Key: x."end"
-                           Cache Mode: logical
-                           ->  Index Scan using person_pkey on t.person b
-                                 Output: b.properties, b.id
-                                 Index Cond: (b.id = x."end")
-(28 rows)
-
-EXPLAIN (VERBOSE, COSTS OFF)
-MATCH (a:person {id: 1})-[x:knows*1..2]->(b:person)
-WITH max(length(x)) AS x, b.id AS id RETURN *;
-                                               QUERY PLAN                                                
----------------------------------------------------------------------------------------------------------
- GroupAggregate
-   Output: max(length(x.edges)), (b.properties.'id'::text)
-   Group Key: (b.properties.'id'::text)
-   ->  Sort
-         Output: (b.properties.'id'::text), x.edges
-         Sort Key: (b.properties.'id'::text)
-         ->  Nested Loop
-               Output: b.properties.'id'::text, x.edges
-               Inner Unique: true
-               ->  Nested Loop
-                     Output: x.edges, x."end"
-                     ->  Seq Scan on t.person a
-                           Output: a.id, a.properties
-                           Filter: (a.properties.'id'::text = '1'::jsonb)
-                     ->  Subquery Scan on x
-                           Output: x.start, x."end", x.ids, x.edges, x.vertices
-                           ->  Graph VLE [1..2]
-                                 ->  Result
-                                       Output: a.id, a.id, '{}'::graphid[], '[]'::edge[], '[]'::vertex[]
-               ->  Memoize
-                     Output: b.properties, b.id
-                     Cache Key: x."end"
-                     Cache Mode: logical
-                     ->  Index Scan using person_pkey on t.person b
-                           Output: b.properties, b.id
-                           Index Cond: (b.id = x."end")
-(26 rows)
+                                             Output: start, "end", ARRAY[id], ARRAY[ROW(id, start, "end", properties, ctid)::edge], NULL::vertex[]
+                                             ->  Append
+                                                   ->  Seq Scan on t.knows
+                                                         Output: start, "end", id, properties, ctid
+                                                         Filter: (a.id = start)
+                                                   ->  Seq Scan on t.friendships
+                                                         Output: start, "end", id, properties, ctid
+                                                         Filter: (a.id = start)
+                                                   ->  Bitmap Heap Scan on t.familyship friendships
+                                                         Output: start, "end", id, properties, ctid
+                                                         Recheck Cond: (a.id = start)
+                                                         ->  Bitmap Index Scan on familyship_start_idx
+                                                               Index Cond: (start = a.id)
+(35 rows)
 
 EXPLAIN (VERBOSE, COSTS OFF)
 MATCH (a:person {id: 1})-[x:knows*1..2]->(b:person)
 RETURN x, x IS NOT NULL, x[0] IS NULL;
-                                         QUERY PLAN                                          
----------------------------------------------------------------------------------------------
- Nested Loop
+                                                              QUERY PLAN                                                               
+---------------------------------------------------------------------------------------------------------------------------------------
+ Hash Join
    Output: x.edges, (x.edges IS NOT NULL), (x.edges[1] IS NOT DISTINCT FROM NULL)
-   Inner Unique: true
-   ->  Nested Loop
+   Hash Cond: (b.id = x."end")
+   ->  Seq Scan on t.person b
+         Output: b.id, b.properties
+   ->  Hash
          Output: x.edges, x."end"
-         ->  Seq Scan on t.person a
-               Output: a.id, a.properties
-               Filter: (a.properties.'id'::text = '1'::jsonb)
-         ->  Subquery Scan on x
-               Output: x.start, x."end", x.ids, x.edges, x.vertices
-               ->  Graph VLE [1..2]
-                     ->  Result
-                           Output: a.id, a.id, '{}'::graphid[], '[]'::edge[], '[]'::vertex[]
-   ->  Memoize
-         Output: b.id
-         Cache Key: x."end"
-         Cache Mode: logical
-         ->  Index Only Scan using person_pkey on t.person b
-               Output: b.id
-               Index Cond: (b.id = x."end")
-(20 rows)
+         ->  Nested Loop
+               Output: x.edges, x."end"
+               ->  Seq Scan on t.person a
+                     Output: a.id, a.properties
+                     Filter: (a.properties.'id'::text = '1'::jsonb)
+               ->  Subquery Scan on x
+                     Output: x.start, x."end", x.ids, x.edges, x.vertices
+                     ->  Graph VLE [1..2]
+                           ->  Result
+                                 Output: start, "end", ARRAY[id], ARRAY[ROW(id, start, "end", properties, ctid)::edge], NULL::vertex[]
+                                 ->  Append
+                                       ->  Seq Scan on t.knows
+                                             Output: start, "end", id, properties, ctid
+                                             Filter: (a.id = start)
+                                       ->  Seq Scan on t.friendships
+                                             Output: start, "end", id, properties, ctid
+                                             Filter: (a.id = start)
+                                       ->  Bitmap Heap Scan on t.familyship friendships
+                                             Output: start, "end", id, properties, ctid
+                                             Recheck Cond: (a.id = start)
+                                             ->  Bitmap Index Scan on familyship_start_idx
+                                                   Index Cond: (start = a.id)
+(29 rows)
 
 EXPLAIN (VERBOSE, COSTS OFF)
 MATCH (a:person {id: 1})-[x:knows*1..2]->(b:person)
 WHERE x[0] IS NOT NULL RETURN x[0];
-                                         QUERY PLAN                                          
----------------------------------------------------------------------------------------------
- Nested Loop
+                                                              QUERY PLAN                                                               
+---------------------------------------------------------------------------------------------------------------------------------------
+ Hash Join
    Output: x.edges[1]
-   Inner Unique: true
-   ->  Nested Loop
+   Hash Cond: (b.id = x."end")
+   ->  Seq Scan on t.person b
+         Output: b.id, b.properties
+   ->  Hash
          Output: x.edges, x."end"
-         ->  Seq Scan on t.person a
-               Output: a.id, a.properties
-               Filter: (a.properties.'id'::text = '1'::jsonb)
-         ->  Subquery Scan on x
-               Output: x.start, x."end", x.ids, x.edges, x.vertices
-               Filter: (x.edges[1] IS DISTINCT FROM NULL)
-               ->  Graph VLE [1..2]
-                     ->  Result
-                           Output: a.id, a.id, '{}'::graphid[], '[]'::edge[], '[]'::vertex[]
-   ->  Memoize
-         Output: b.id
-         Cache Key: x."end"
-         Cache Mode: logical
-         ->  Index Only Scan using person_pkey on t.person b
-               Output: b.id
-               Index Cond: (b.id = x."end")
-(21 rows)
-
-EXPLAIN (VERBOSE, COSTS OFF)
-SELECT * FROM (
-  MATCH (a:person {id: 1})-[x:knows*1..2]->(b:person)
-  WHERE x[0] IS NOT NULL RETURN x[0]
-  UNION ALL
-  MATCH (a:person {id: 1})-[x:knows*1..2]->(b:person)
-  RETURN x[1]
-) AS foo;
-                                              QUERY PLAN                                               
--------------------------------------------------------------------------------------------------------
- Append
-   ->  Nested Loop
-         Output: x.edges[1]
-         Inner Unique: true
          ->  Nested Loop
                Output: x.edges, x."end"
                ->  Seq Scan on t.person a
@@ -1785,35 +1932,92 @@ SELECT * FROM (
                      Filter: (x.edges[1] IS DISTINCT FROM NULL)
                      ->  Graph VLE [1..2]
                            ->  Result
-                                 Output: a.id, a.id, '{}'::graphid[], '[]'::edge[], '[]'::vertex[]
-         ->  Memoize
-               Output: b.id
-               Cache Key: x."end"
-               Cache Mode: logical
-               ->  Index Only Scan using person_pkey on t.person b
-                     Output: b.id
-                     Index Cond: (b.id = x."end")
-   ->  Nested Loop
+                                 Output: start, "end", ARRAY[id], ARRAY[ROW(id, start, "end", properties, ctid)::edge], NULL::vertex[]
+                                 ->  Append
+                                       ->  Seq Scan on t.knows
+                                             Output: start, "end", id, properties, ctid
+                                             Filter: (a.id = start)
+                                       ->  Seq Scan on t.friendships
+                                             Output: start, "end", id, properties, ctid
+                                             Filter: (a.id = start)
+                                       ->  Bitmap Heap Scan on t.familyship friendships
+                                             Output: start, "end", id, properties, ctid
+                                             Recheck Cond: (a.id = start)
+                                             ->  Bitmap Index Scan on familyship_start_idx
+                                                   Index Cond: (start = a.id)
+(30 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT * FROM (
+  MATCH (a:person {id: 1})-[x:knows*1..2]->(b:person)
+  WHERE x[0] IS NOT NULL RETURN x[0]
+  UNION ALL
+  MATCH (a:person {id: 1})-[x:knows*1..2]->(b:person)
+  RETURN x[1]
+) AS foo;
+                                                                 QUERY PLAN                                                                  
+---------------------------------------------------------------------------------------------------------------------------------------------
+ Append
+   ->  Hash Join
+         Output: x.edges[1]
+         Hash Cond: (b.id = x."end")
+         ->  Seq Scan on t.person b
+               Output: b.id, b.properties
+         ->  Hash
+               Output: x.edges, x."end"
+               ->  Nested Loop
+                     Output: x.edges, x."end"
+                     ->  Seq Scan on t.person a
+                           Output: a.id, a.properties
+                           Filter: (a.properties.'id'::text = '1'::jsonb)
+                     ->  Subquery Scan on x
+                           Output: x.start, x."end", x.ids, x.edges, x.vertices
+                           Filter: (x.edges[1] IS DISTINCT FROM NULL)
+                           ->  Graph VLE [1..2]
+                                 ->  Result
+                                       Output: start, "end", ARRAY[id], ARRAY[ROW(id, start, "end", properties, ctid)::edge], NULL::vertex[]
+                                       ->  Append
+                                             ->  Seq Scan on t.knows
+                                                   Output: start, "end", id, properties, ctid
+                                                   Filter: (a.id = start)
+                                             ->  Seq Scan on t.friendships
+                                                   Output: start, "end", id, properties, ctid
+                                                   Filter: (a.id = start)
+                                             ->  Bitmap Heap Scan on t.familyship friendships
+                                                   Output: start, "end", id, properties, ctid
+                                                   Recheck Cond: (a.id = start)
+                                                   ->  Bitmap Index Scan on familyship_start_idx
+                                                         Index Cond: (start = a.id)
+   ->  Hash Join
          Output: x_1.edges[2]
-         Inner Unique: true
-         ->  Nested Loop
+         Hash Cond: (b_1.id = x_1."end")
+         ->  Seq Scan on t.person b_1
+               Output: b_1.id, b_1.properties
+         ->  Hash
                Output: x_1.edges, x_1."end"
-               ->  Seq Scan on t.person a_1
-                     Output: a_1.id, a_1.properties
-                     Filter: (a_1.properties.'id'::text = '1'::jsonb)
-               ->  Subquery Scan on x_1
-                     Output: x_1.start, x_1."end", x_1.ids, x_1.edges, x_1.vertices
-                     ->  Graph VLE [1..2]
-                           ->  Result
-                                 Output: a_1.id, a_1.id, '{}'::graphid[], '[]'::edge[], '[]'::vertex[]
-         ->  Memoize
-               Output: b_1.id
-               Cache Key: x_1."end"
-               Cache Mode: logical
-               ->  Index Only Scan using person_pkey on t.person b_1
-                     Output: b_1.id
-                     Index Cond: (b_1.id = x_1."end")
-(42 rows)
+               ->  Nested Loop
+                     Output: x_1.edges, x_1."end"
+                     ->  Seq Scan on t.person a_1
+                           Output: a_1.id, a_1.properties
+                           Filter: (a_1.properties.'id'::text = '1'::jsonb)
+                     ->  Subquery Scan on x_1
+                           Output: x_1.start, x_1."end", x_1.ids, x_1.edges, x_1.vertices
+                           ->  Graph VLE [1..2]
+                                 ->  Result
+                                       Output: start, "end", ARRAY[id], ARRAY[ROW(id, start, "end", properties, ctid)::edge], NULL::vertex[]
+                                       ->  Append
+                                             ->  Seq Scan on t.knows
+                                                   Output: start, "end", id, properties, ctid
+                                                   Filter: (a_1.id = start)
+                                             ->  Seq Scan on t.friendships
+                                                   Output: start, "end", id, properties, ctid
+                                                   Filter: (a_1.id = start)
+                                             ->  Bitmap Heap Scan on t.familyship friendships
+                                                   Output: start, "end", id, properties, ctid
+                                                   Recheck Cond: (a_1.id = start)
+                                                   ->  Bitmap Index Scan on familyship_start_idx
+                                                         Index Cond: (start = a_1.id)
+(60 rows)
 
 -- AG-154, CS-34 - VLE returns incoreect result with sequential scan
 CREATE GRAPH ag154;
@@ -1873,11 +2077,7 @@ SET graph_path = ag216;
 CREATE (:v1)-[:e]->(:v2)-[:e]->(:v3);
 SET enable_seqscan = off;
 MATCH p=(:v1)-[*]->(:v3) RETURN p;
-                                  p                                  
----------------------------------------------------------------------
- [v1[3.1]{},e[4.1][3.1,5.1]{},v2[5.1]{},e[4.2][5.1,6.1]{},v3[6.1]{}]
-(1 row)
-
+ERROR:  the numbers of vertices and edges are mismatched
 SET enable_seqscan = on;
 CREATE GRAPH ag216a;
 SET graph_path = ag216a;
@@ -1887,18 +2087,7 @@ CREATE (n)-[:e2]->(:v2 {lv: 2}), (n)-[:e2]->(:v2 {lv: 2});
 MATCH (n:v2 {lv: 2})
 CREATE (n)-[:e3]->(:v3), (n)-[:e3]->(:v3);
 MATCH p=(:v1)-[*3]->() RETURN p;
-                                                        p                                                         
-------------------------------------------------------------------------------------------------------------------
- [v1[3.1]{},e1[4.1][3.1,5.1]{},v2[5.1]{"lv": 1},e2[6.1][5.1,5.3]{},v2[5.3]{"lv": 2},e3[7.1][5.3,8.1]{},v3[8.1]{}]
- [v1[3.1]{},e1[4.1][3.1,5.1]{},v2[5.1]{"lv": 1},e2[6.1][5.1,5.3]{},v2[5.3]{"lv": 2},e3[7.2][5.3,8.2]{},v3[8.2]{}]
- [v1[3.1]{},e1[4.1][3.1,5.1]{},v2[5.1]{"lv": 1},e2[6.2][5.1,5.4]{},v2[5.4]{"lv": 2},e3[7.3][5.4,8.3]{},v3[8.3]{}]
- [v1[3.1]{},e1[4.1][3.1,5.1]{},v2[5.1]{"lv": 1},e2[6.2][5.1,5.4]{},v2[5.4]{"lv": 2},e3[7.4][5.4,8.4]{},v3[8.4]{}]
- [v1[3.1]{},e1[4.2][3.1,5.2]{},v2[5.2]{"lv": 1},e2[6.3][5.2,5.5]{},v2[5.5]{"lv": 2},e3[7.5][5.5,8.5]{},v3[8.5]{}]
- [v1[3.1]{},e1[4.2][3.1,5.2]{},v2[5.2]{"lv": 1},e2[6.3][5.2,5.5]{},v2[5.5]{"lv": 2},e3[7.6][5.5,8.6]{},v3[8.6]{}]
- [v1[3.1]{},e1[4.2][3.1,5.2]{},v2[5.2]{"lv": 1},e2[6.4][5.2,5.6]{},v2[5.6]{"lv": 2},e3[7.7][5.6,8.7]{},v3[8.7]{}]
- [v1[3.1]{},e1[4.2][3.1,5.2]{},v2[5.2]{"lv": 1},e2[6.4][5.2,5.6]{},v2[5.6]{"lv": 2},e3[7.8][5.6,8.8]{},v3[8.8]{}]
-(8 rows)
-
+ERROR:  the numbers of vertices and edges are mismatched
 -- Test cases for variable reuse
 CREATE GRAPH variable_reuse;
 SET graph_path = variable_reuse;
@@ -3935,14 +4124,7 @@ MERGE (x0)-[:edge]->(b0);
 -- 4 row set
 MATCH p=((u:vertex {name: 'A'})-[*]->(v:vertex {name: 'B'}))
 RETURN p LIMIT 4; --crash
-                                                                                                                                p                                                                                                                                 
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- [vertex[3.1]{"name": "A"},edge[4.1][3.1,3.2]{},vertex[3.2]{"name": "B"}]
- [vertex[3.1]{"name": "A"},edge[4.1][3.1,3.2]{},vertex[3.2]{"name": "B"},edge[4.3][3.2,3.3]{},vertex[3.3]{"name": "Q"},edge[4.2][3.3,3.1]{},vertex[3.1]{"name": "A"},edge[4.4][3.1,3.4]{},vertex[3.4]{"name": "X"},edge[4.5][3.4,3.2]{},vertex[3.2]{"name": "B"}]
- [vertex[3.1]{"name": "A"},edge[4.4][3.1,3.4]{},vertex[3.4]{"name": "X"},edge[4.5][3.4,3.2]{},vertex[3.2]{"name": "B"}]
- [vertex[3.1]{"name": "A"},edge[4.4][3.1,3.4]{},vertex[3.4]{"name": "X"},edge[4.5][3.4,3.2]{},vertex[3.2]{"name": "B"},edge[4.3][3.2,3.3]{},vertex[3.3]{"name": "Q"},edge[4.2][3.3,3.1]{},vertex[3.1]{"name": "A"},edge[4.1][3.1,3.2]{},vertex[3.2]{"name": "B"}]
-(4 rows)
-
+ERROR:  the numbers of vertices and edges are mismatched
 -- 22 row set
 MATCH p=((u)-[*0..3]->(v)) RETURN p LIMIT 0; --no crash (nc)
  p 
@@ -3987,24 +4169,9 @@ MATCH p=((u)-[*..3]->(v)) RETURN p LIMIT 1; -- nc
 (1 row)
 
 MATCH p=((u)-[*..3]->(v)) RETURN p LIMIT 4; -- nc/mem
-                                                                                  p                                                                                   
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
- [vertex[3.1]{"name": "A"},edge[4.1][3.1,3.2]{},vertex[3.2]{"name": "B"}]
- [vertex[3.1]{"name": "A"},edge[4.1][3.1,3.2]{},vertex[3.2]{"name": "B"},edge[4.3][3.2,3.3]{},vertex[3.3]{"name": "Q"}]
- [vertex[3.1]{"name": "A"},edge[4.1][3.1,3.2]{},vertex[3.2]{"name": "B"},edge[4.3][3.2,3.3]{},vertex[3.3]{"name": "Q"},edge[4.2][3.3,3.1]{},vertex[3.1]{"name": "A"}]
- [vertex[3.1]{"name": "A"},edge[4.4][3.1,3.4]{},vertex[3.4]{"name": "X"}]
-(4 rows)
-
+ERROR:  the numbers of vertices and edges are mismatched
 MATCH p=((u)-[*..3]->(v)) RETURN p LIMIT 5; -- crash
-                                                                                  p                                                                                   
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
- [vertex[3.1]{"name": "A"},edge[4.1][3.1,3.2]{},vertex[3.2]{"name": "B"}]
- [vertex[3.1]{"name": "A"},edge[4.1][3.1,3.2]{},vertex[3.2]{"name": "B"},edge[4.3][3.2,3.3]{},vertex[3.3]{"name": "Q"}]
- [vertex[3.1]{"name": "A"},edge[4.1][3.1,3.2]{},vertex[3.2]{"name": "B"},edge[4.3][3.2,3.3]{},vertex[3.3]{"name": "Q"},edge[4.2][3.3,3.1]{},vertex[3.1]{"name": "A"}]
- [vertex[3.1]{"name": "A"},edge[4.4][3.1,3.4]{},vertex[3.4]{"name": "X"}]
- [vertex[3.1]{"name": "A"},edge[4.4][3.1,3.4]{},vertex[3.4]{"name": "X"},edge[4.5][3.4,3.2]{},vertex[3.2]{"name": "B"}]
-(5 rows)
-
+ERROR:  the numbers of vertices and edges are mismatched
 DROP GRAPH asterisk CASCADE;
 NOTICE:  drop cascades to 7 other objects
 DETAIL:  drop cascades to sequence asterisk.ag_label_seq
@@ -4154,6 +4321,88 @@ MATCH (v1:new_v1)-[e1:new_e1]->(v2:new_v1) RETURN v1,e1,v2;
  new_v1[3.3]{} | new_e1[4.2][3.3,3.4]{} | new_v1[3.4]{}
 (2 rows)
 
+--
+-- Test for OPTIONAL MATCH with variable-length patterns
+-- This test ensures that variable-length patterns in OPTIONAL MATCH clauses
+-- work correctly and produce the same results as equivalent simple patterns.
+-- Regression test for issue where *1..1 patterns were incorrectly treated as zero-length.
+--
+CREATE GRAPH test_optional_vle;
+SET graph_path = test_optional_vle;
+-- Create test data
+CREATE VLABEL node;
+CREATE ELABEL edge;
+-- Create test vertices and edges
+CREATE (:node {id: 1})-[:edge]->(:node {id: 2});
+CREATE (:node {id: 2})-[:edge]->(:node {id: 3});
+CREATE (:node {id: 3})-[:edge]->(:node {id: 1});
+-- Test that simple edge pattern and *1..1 pattern with length()=1 produce same results
+-- This was the core issue: these two queries should return the same count
+SELECT 'Simple edge pattern count:' as description;
+        description         
+----------------------------
+ "Simple edge pattern count:"
+(1 row)
+
+MATCH (n1:node) 
+OPTIONAL MATCH (n1)<-[r]-(n2) 
+RETURN count(*);
+ count 
+-------
+ 6
+(1 row)
+
+SELECT 'VLE *1..1 pattern count:' as description;
+        description        
+---------------------------
+ "VLE *1..1 pattern count:"
+(1 row)
+
+MATCH (n1:node) 
+OPTIONAL MATCH (n1)<-[r*1..1]-(n2) WHERE length(r) = 1 
+RETURN count(*);
+ count 
+-------
+ 6
+(1 row)
+
+-- Test *0..1 pattern behavior
+SELECT 'VLE *0..1 pattern count:' as description;
+        description        
+---------------------------
+ "VLE *0..1 pattern count:"
+(1 row)
+
+MATCH (n1:node) 
+OPTIONAL MATCH (n1)<-[r*0..1]-(n2) 
+RETURN count(*);
+ count 
+-------
+ 9
+(1 row)
+
+-- Test that zero-length patterns (*0..0) work correctly 
+SELECT 'VLE *0..0 pattern count:' as description;
+        description        
+---------------------------
+ "VLE *0..0 pattern count:"
+(1 row)
+
+MATCH (n1:node) 
+OPTIONAL MATCH (n1)<-[r*0..0]-(n2) 
+RETURN count(*);
+ count 
+-------
+ 6
+(1 row)
+
+DROP GRAPH test_optional_vle CASCADE;
+NOTICE:  drop cascades to 5 other objects
+DETAIL:  drop cascades to sequence test_optional_vle.ag_label_seq
+drop cascades to vlabel ag_vertex
+drop cascades to elabel ag_edge
+drop cascades to vlabel node
+drop cascades to elabel edge
 -- cleanup
 DROP GRAPH srf CASCADE;
 NOTICE:  drop cascades to 5 other objects
