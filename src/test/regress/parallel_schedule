@@ -159,5 +159,8 @@ test: sql_restriction
 # run property index
 test: propertyindex
 
+# test for optional match with VLE patterns
+test: cypher_optional_vle
+
 # run cypher finalize
 test: cypher_finalize

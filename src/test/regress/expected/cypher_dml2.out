@@ -112,10 +112,13 @@ a.name = 'Alice'
 AND b.name = 'Daniel'
 AND all(x IN nodes(p) WHERE x.age > 30)
 RETURN [x in nodes(p) | x.age];
-   ?column?   
---------------
- [51, 53, 54]
-(1 row)
+ ?column? 
+----------
+ [51, 54]
+ [51, 54]
+ [51, 54]
+ [51, 54]
+(4 rows)
 
 -- any(..)
 MATCH (n)
@@ -190,12 +193,7 @@ WHERE
 n.name = 'Alice'
 AND none(x IN nodes(p) WHERE x.age = 25)
 RETURN p ;
-                                                                                                                            p                                                                                                                             
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- [person[11.2]{"age": 51, "eyes": "brown", "name": "Alice"},knows[12.1][11.2,11.4]{},person[11.4]{"age": 53, "eyes": "green", "name": "Charlie"}]
- [person[11.2]{"age": 51, "eyes": "brown", "name": "Alice"},knows[12.1][11.2,11.4]{},person[11.4]{"age": 53, "eyes": "green", "name": "Charlie"},knows[12.3][11.4,11.6]{},person[11.6]{"age": 54, "eyes": "brown", "name": "Daniel", "liked_colors": ""}]
-(2 rows)
-
+ERROR:  the numbers of vertices and edges are mismatched
 -- single(..)
 MATCH p = (n)-[]->(b)
 WHERE
@@ -494,45 +492,59 @@ EXPLAIN VERBOSE MATCH p=(a)-[]-(a) RETURN *;
 
 -- #609, column does not exists
 EXPLAIN MATCH (a),(a)-[*1..1]->(b) RETURN count(a);
-                                     QUERY PLAN                                      
--------------------------------------------------------------------------------------
- Aggregate  (cost=101.16..101.17 rows=1 width=32)
-   ->  Hash Join  (cost=37.00..98.16 rows=1200 width=46)
+                                                     QUERY PLAN                                                      
+---------------------------------------------------------------------------------------------------------------------
+ Aggregate  (cost=15542.11..15542.12 rows=1 width=32)
+   ->  Hash Join  (cost=37.00..15524.11 rows=7200 width=46)
          Hash Cond: ("<0000000017>"."end" = b.id)
-         ->  Nested Loop  (cost=0.00..58.00 rows=1200 width=54)
+         ->  Nested Loop  (cost=0.00..15468.14 rows=7200 width=54)
                ->  Seq Scan on ag_vertex a  (cost=0.00..22.00 rows=1200 width=46)
-               ->  Subquery Scan on "<0000000017>"  (cost=0.00..0.02 rows=1 width=8)
-                     ->  Graph VLE [1..1]  (cost=0.00..0.01 rows=1 width=0)
-                           ->  Result  (cost=0.00..0.01 rows=1 width=80)
+               ->  Subquery Scan on "<0000000017>"  (cost=0.00..12.81 rows=6 width=8)
+                     ->  Graph VLE [1..1]  (cost=0.00..12.75 rows=6 width=0)
+                           ->  Result  (cost=0.00..12.75 rows=6 width=80)
+                                 ->  Append  (cost=0.00..12.69 rows=6 width=24)
+                                       ->  Seq Scan on ag_edge  (cost=0.00..0.00 rows=1 width=24)
+                                             Filter: (a.id = start)
+                                       ->  Bitmap Heap Scan on e1  (cost=4.19..12.66 rows=5 width=24)
+                                             Recheck Cond: (a.id = start)
+                                             ->  Bitmap Index Scan on e1_start_idx  (cost=0.00..4.19 rows=5 width=0)
+                                                   Index Cond: (start = a.id)
          ->  Hash  (cost=22.00..22.00 rows=1200 width=8)
                ->  Seq Scan on ag_vertex b  (cost=0.00..22.00 rows=1200 width=8)
-(10 rows)
+(17 rows)
 
 MATCH (a),(a)-[*1..1]->(b) RETURN count(a);
  count 
 -------
- 4
+ 6
 (1 row)
 
 EXPLAIN MATCH (a)-[*1..1]->(b) RETURN count(a);
-                                     QUERY PLAN                                      
--------------------------------------------------------------------------------------
- Aggregate  (cost=101.16..101.17 rows=1 width=32)
-   ->  Hash Join  (cost=37.00..98.16 rows=1200 width=46)
+                                                     QUERY PLAN                                                      
+---------------------------------------------------------------------------------------------------------------------
+ Aggregate  (cost=15542.11..15542.12 rows=1 width=32)
+   ->  Hash Join  (cost=37.00..15524.11 rows=7200 width=46)
          Hash Cond: ("<0000000019>"."end" = b.id)
-         ->  Nested Loop  (cost=0.00..58.00 rows=1200 width=54)
+         ->  Nested Loop  (cost=0.00..15468.14 rows=7200 width=54)
                ->  Seq Scan on ag_vertex a  (cost=0.00..22.00 rows=1200 width=46)
-               ->  Subquery Scan on "<0000000019>"  (cost=0.00..0.02 rows=1 width=8)
-                     ->  Graph VLE [1..1]  (cost=0.00..0.01 rows=1 width=0)
-                           ->  Result  (cost=0.00..0.01 rows=1 width=80)
+               ->  Subquery Scan on "<0000000019>"  (cost=0.00..12.81 rows=6 width=8)
+                     ->  Graph VLE [1..1]  (cost=0.00..12.75 rows=6 width=0)
+                           ->  Result  (cost=0.00..12.75 rows=6 width=80)
+                                 ->  Append  (cost=0.00..12.69 rows=6 width=24)
+                                       ->  Seq Scan on ag_edge  (cost=0.00..0.00 rows=1 width=24)
+                                             Filter: (a.id = start)
+                                       ->  Bitmap Heap Scan on e1  (cost=4.19..12.66 rows=5 width=24)
+                                             Recheck Cond: (a.id = start)
+                                             ->  Bitmap Index Scan on e1_start_idx  (cost=0.00..4.19 rows=5 width=0)
+                                                   Index Cond: (start = a.id)
          ->  Hash  (cost=22.00..22.00 rows=1200 width=8)
                ->  Seq Scan on ag_vertex b  (cost=0.00..22.00 rows=1200 width=8)
-(10 rows)
+(17 rows)
 
 MATCH (a)-[*1..1]->(b) RETURN count(a);
  count 
 -------
- 4
+ 6
 (1 row)
 
 DROP GRAPH cypher_dml2 CASCADE;

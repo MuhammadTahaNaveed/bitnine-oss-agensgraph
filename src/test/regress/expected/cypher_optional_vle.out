@@ -4,44 +4,83 @@
 -- work correctly and produce the same results as equivalent simple patterns.
 -- Regression test for issue where *1..1 patterns were incorrectly treated as zero-length.
 --
-
 -- Create test graph
 DROP GRAPH IF EXISTS test_optional_vle CASCADE;
+NOTICE:  graph "test_optional_vle" does not exist, skipping
 CREATE GRAPH test_optional_vle;
 SET graph_path = test_optional_vle;
-
 -- Create test data
 CREATE VLABEL node;
 CREATE ELABEL edge;
-
 -- Create test vertices and edges
 CREATE (:node {id: 1})-[:edge]->(:node {id: 2});
 CREATE (:node {id: 2})-[:edge]->(:node {id: 3});
 CREATE (:node {id: 3})-[:edge]->(:node {id: 1});
-
 -- Test that simple edge pattern and *1..1 pattern with length()=1 produce same results
 -- This was the core issue: these two queries should return the same count
 SELECT 'Simple edge pattern count:' as description;
+        description         
+----------------------------
+ Simple edge pattern count:
+(1 row)
+
 MATCH (n1:node) 
 OPTIONAL MATCH (n1)<-[r]-(n2) 
 RETURN count(*);
+ count 
+-------
+ 6
+(1 row)
 
 SELECT 'VLE *1..1 pattern count:' as description;
+       description        
+--------------------------
+ VLE *1..1 pattern count:
+(1 row)
+
 MATCH (n1:node) 
 OPTIONAL MATCH (n1)<-[r*1..1]-(n2) WHERE length(r) = 1 
 RETURN count(*);
+ count 
+-------
+ 6
+(1 row)
 
 -- Test *0..1 pattern behavior
 SELECT 'VLE *0..1 pattern count:' as description;
+       description        
+--------------------------
+ VLE *0..1 pattern count:
+(1 row)
+
 MATCH (n1:node) 
 OPTIONAL MATCH (n1)<-[r*0..1]-(n2) 
 RETURN count(*);
+ count 
+-------
+ 9
+(1 row)
 
 -- Test that zero-length patterns (*0..0) work correctly 
 SELECT 'VLE *0..0 pattern count:' as description;
+       description        
+--------------------------
+ VLE *0..0 pattern count:
+(1 row)
+
 MATCH (n1:node) 
 OPTIONAL MATCH (n1)<-[r*0..0]-(n2) 
 RETURN count(*);
+ count 
+-------
+ 6
+(1 row)
 
 -- Clean up
 DROP GRAPH test_optional_vle CASCADE;
+NOTICE:  drop cascades to 5 other objects
+DETAIL:  drop cascades to sequence test_optional_vle.ag_label_seq
+drop cascades to vlabel ag_vertex
+drop cascades to elabel ag_edge
+drop cascades to vlabel node
+drop cascades to elabel edge
