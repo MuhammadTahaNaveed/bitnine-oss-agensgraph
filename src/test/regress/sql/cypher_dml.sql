@@ -1618,6 +1618,50 @@ ALTER VLABEL v1 RENAME TO new_v1;
 CREATE (:new_v1)-[:new_e1]->(:new_v1);
 MATCH (v1:new_v1)-[e1:new_e1]->(v2:new_v1) RETURN v1,e1,v2;
 
+--
+-- Test for OPTIONAL MATCH with variable-length patterns
+-- This test ensures that variable-length patterns in OPTIONAL MATCH clauses
+-- work correctly and produce the same results as equivalent simple patterns.
+-- Regression test for issue where *1..1 patterns were incorrectly treated as zero-length.
+--
+CREATE GRAPH test_optional_vle;
+SET graph_path = test_optional_vle;
+
+-- Create test data
+CREATE VLABEL node;
+CREATE ELABEL edge;
+
+-- Create test vertices and edges
+CREATE (:node {id: 1})-[:edge]->(:node {id: 2});
+CREATE (:node {id: 2})-[:edge]->(:node {id: 3});
+CREATE (:node {id: 3})-[:edge]->(:node {id: 1});
+
+-- Test that simple edge pattern and *1..1 pattern with length()=1 produce same results
+-- This was the core issue: these two queries should return the same count
+SELECT 'Simple edge pattern count:' as description;
+MATCH (n1:node) 
+OPTIONAL MATCH (n1)<-[r]-(n2) 
+RETURN count(*);
+
+SELECT 'VLE *1..1 pattern count:' as description;
+MATCH (n1:node) 
+OPTIONAL MATCH (n1)<-[r*1..1]-(n2) WHERE length(r) = 1 
+RETURN count(*);
+
+-- Test *0..1 pattern behavior
+SELECT 'VLE *0..1 pattern count:' as description;
+MATCH (n1:node) 
+OPTIONAL MATCH (n1)<-[r*0..1]-(n2) 
+RETURN count(*);
+
+-- Test that zero-length patterns (*0..0) work correctly 
+SELECT 'VLE *0..0 pattern count:' as description;
+MATCH (n1:node) 
+OPTIONAL MATCH (n1)<-[r*0..0]-(n2) 
+RETURN count(*);
+
+DROP GRAPH test_optional_vle CASCADE;
+
 -- cleanup
 
 DROP GRAPH srf CASCADE;
