@@ -3006,14 +3006,39 @@ transformVLEtoNSItem(ParseState *pstate, CypherRel *crel, SelectStmt *vle, Alias
 static bool
 isZeroLengthVLE(CypherRel *crel)
 {
+	A_Indices  *varlen;
+	A_Const    *lidx_const;
+	int			min_length;
+
 	if (crel == NULL)
 		return false;
 
 	if (crel->varlen == NULL)
 		return false;
 
-	/* todo: corrects function name */
-	return true;
+	varlen = (A_Indices *) crel->varlen;
+
+	/* Get the minimum length (lidx) */
+	if (varlen->lidx == NULL)
+	{
+		/* Default minimum length is 1 if not specified */
+		min_length = 1;
+	}
+	else if (IsA(varlen->lidx, A_Const))
+	{
+		lidx_const = (A_Const *) varlen->lidx;
+		if (IsA(&lidx_const->val, Integer))
+			min_length = intVal(&lidx_const->val);
+		else
+			return false; /* Non-integer bounds are not zero-length */
+	}
+	else
+	{
+		return false; /* Non-constant bounds cannot be determined to be zero-length */
+	}
+
+	/* A VLE is zero-length only if minimum length is 0 */
+	return (min_length == 0);
 }
 
 static void
