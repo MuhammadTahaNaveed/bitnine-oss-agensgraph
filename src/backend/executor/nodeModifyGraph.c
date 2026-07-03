@@ -547,6 +547,38 @@ predrainEagerWriters(PlanState *node)
 	(void) predrainEagerWriterWalker(node, NULL);
 }
 
+/*
+ * ExecPredrainGraphWriters
+ *
+ * Run every eager graph-write clause in the plan tree before the first read
+ * of the plan's output.  A ModifyGraph node applies this barrier itself
+ * before it reads the heap (see predrainEagerWriters above), but when the
+ * statement's LAST reader is not a graph-write clause -- a plain SELECT over
+ * chained write clauses, e.g. "MATCH ... SET ... WITH x MATCH ... RETURN ..."
+ * -- nothing above the writes enforces it, and the top-level plan is free to
+ * order its work so that the write side is read late or never:
+ *
+ * - A hash join whose other input turns out empty returns before building
+ *   (or ever pulling) the side that contains the write clauses, silently
+ *   skipping every write.
+ * - A hash join that prefetches/builds the label-scan side first captures
+ *   pre-write tuple versions, so the trailing read observes stale data even
+ *   though the writes do land.
+ *
+ * Cypher's clause pipeline semantics require a write clause to apply to
+ * every row that reaches it, with later clauses observing the result, no
+ * matter what plan shape the reader chose.  ExecutorRun therefore applies
+ * the barrier once, before the first pull of any CMD_SELECT plan that
+ * contains a graph write.  Draining is idempotent (child_done guards), does
+ * not change the chosen plan, and only forces work the pipeline semantics
+ * require to happen anyway.
+ */
+void
+ExecPredrainGraphWriters(PlanState *planstate)
+{
+	predrainEagerWriters(planstate);
+}
+
 static TupleTableSlot *
 ExecModifyGraph(PlanState *pstate)
 {

@@ -46,6 +46,7 @@
 #include "commands/matview.h"
 #include "commands/trigger.h"
 #include "executor/executor.h"
+#include "executor/nodeModifyGraph.h"
 #include "executor/nodeSubplan.h"
 #include "foreign/fdwapi.h"
 #include "mb/pg_wchar.h"
@@ -374,6 +375,18 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 	{
 		if (execute_once && queryDesc->already_executed)
 			elog(ERROR, "can't re-execute query flagged for single execution");
+
+		/*
+		 * A SELECT over graph-write clauses must apply the writes no matter
+		 * how (or whether) the reading side of the plan consumes them; run
+		 * the write barrier once, before the first pull.  See
+		 * ExecPredrainGraphWriters.
+		 */
+		if (!queryDesc->already_executed &&
+			operation == CMD_SELECT &&
+			queryDesc->plannedstmt->hasGraphwriteClause)
+			ExecPredrainGraphWriters(queryDesc->planstate);
+
 		queryDesc->already_executed = true;
 
 		ExecutePlan(estate,

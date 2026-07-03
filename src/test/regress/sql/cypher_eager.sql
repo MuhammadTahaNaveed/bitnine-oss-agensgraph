@@ -501,6 +501,46 @@ MATCH (n:read_after_create) DETACH DELETE n;
 -- must still match nothing (the One-Time Filter optimisation is preserved).
 MATCH (x:never_created_label) RETURN count(x) AS should_be_0;
 
+
+-- A write clause must apply to every row that reaches it no matter how (or
+-- whether) the reading side of the plan consumes its output.
+
+CREATE VLABEL wb1;
+CREATE VLABEL wb2;
+CREATE (:wb1 {i: 0, v: 0}), (:wb1 {i: 1, v: 0}), (:wb1 {i: 2, v: 0});
+
+-- A hash join whose other input is empty returns before ever pulling the
+-- side that contains the write clauses; the writes must still happen.
+MATCH (x:wb1) SET x.v = 9 WITH x MATCH (z:wb2) WHERE z.i = x.i
+RETURN count(*) AS no_rows;
+MATCH (x:wb1) RETURN x.i, x.v ORDER BY x.i;
+
+-- A trailing read must observe the writes even when a Sort sits between the
+-- write and the join, whatever side the join builds/prefetches first.
+SET enable_mergejoin = off;
+MATCH (x:wb1) SET x.v = 3 WITH x ORDER BY x.i WITH x
+MATCH (y:wb1) WHERE y.i = x.i
+RETURN sum(y.v) AS should_be_9;
+SET enable_mergejoin = on;
+
+-- A non-last CREATE streams; when a later MATCH scans the created label, the
+-- creation is forced eager so the scan cannot run first and miss the rows.
+MATCH (x:wb1) CREATE (:wb2 {i: x.i}) WITH x
+MATCH (z:wb2) WHERE z.i = x.i
+RETURN count(*) AS should_be_3;
+MATCH (z:wb2) RETURN count(*) AS wb2_total;
+EXPLAIN (COSTS OFF)
+MATCH (x:wb1) CREATE (:wb2 {i: x.i}) WITH x MATCH (z:wb2) RETURN count(*);
+
+-- ... but a creation into a label the trailing pattern cannot touch keeps
+-- streaming (the eager forcing is label-aware, including inheritance).
+CREATE VLABEL wb3;
+EXPLAIN (COSTS OFF)
+MATCH (x:wb1) CREATE (:wb3 {i: x.i}) WITH x MATCH (z:wb2) RETURN count(*);
+
+MATCH (n:wb1) DETACH DELETE n;
+MATCH (n:wb2) DETACH DELETE n;
+
 -- cleanup
 
 DROP GRAPH eager_graph CASCADE;

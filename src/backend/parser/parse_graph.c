@@ -343,6 +343,7 @@ static Node *transformPropMap(ParseState *pstate, Node *expr,
 							  ParseExprKind exprKind);
 static Node *stripNullKeys(ParseState *pstate, Node *properties);
 static void assign_query_eager(Query *query);
+static void forceEagerWritesBeforeRead(Query *qry, List *pattern);
 
 /* transform */
 typedef Query *(*TransformMethod) (ParseState *pstate, Node *parseTree);
@@ -972,6 +973,14 @@ transformCypherMatchClause(ParseState *pstate, CypherClause *clause)
 	qry->rteperminfos = pstate->p_rteperminfos;
 	qry->hasSubLinks = pstate->p_hasSubLinks;
 	qry->hasGraphwriteClause = pstate->p_hasGraphwriteClause;
+
+	/*
+	 * A write clause below this MATCH must have physically happened before
+	 * this MATCH scans the heap; force streaming creations this pattern may
+	 * observe to run eagerly.
+	 */
+	if (qry->hasGraphwriteClause)
+		forceEagerWritesBeforeRead(qry, detail->pattern);
 
 	assign_query_collations(pstate, qry);
 
@@ -6893,6 +6902,197 @@ assign_query_eager(Query *query)
 	if (query->g_eager == true &&
 		enable_eager == false)
 		elog(ERROR, "eagerness plan is not allowed.");
+}
+
+/*
+ * addLabelReadRelids
+ *		Append the relation OIDs a scan of the named label reads -- the
+ *		label's own table and, through inheritance, every sub-label's -- to
+ *		the given list.  A label that does not exist yet can only make the
+ *		query valid by being auto-created by a preceding write clause of this
+ *		statement (see labelCreatedByPrevClause), so the scan would certainly
+ *		observe this statement's writes: treat it as reading every label of
+ *		its kind (the fallback root, ag_vertex or ag_edge).
+ */
+static List *
+addLabelReadRelids(List *read_relids, const char *labname,
+				   const char *fallback_root, Oid graph_oid)
+{
+	Oid			laboid;
+	Oid			relid;
+
+	laboid = get_labname_laboid(labname, graph_oid);
+	if (!OidIsValid(laboid))
+		laboid = get_labname_laboid(fallback_root, graph_oid);
+	if (!OidIsValid(laboid))
+		return read_relids;
+
+	relid = get_laboid_relid(laboid);
+	if (!OidIsValid(relid))
+		return read_relids;
+
+	return list_concat(read_relids,
+					   find_all_inheritors(relid, AccessShareLock, NULL));
+}
+
+/*
+ * graphPatternCreatesInto
+ *		Does this write clause's CREATE/MERGE pattern create an element in
+ *		one of the given label relations?
+ */
+static bool
+graphPatternCreatesInto(List *pattern, List *read_relids)
+{
+	ListCell   *lp;
+
+	foreach(lp, pattern)
+	{
+		GraphPath  *gpath = lfirst(lp);
+		ListCell   *le;
+
+		foreach(le, gpath->chain)
+		{
+			Node	   *elem = lfirst(le);
+
+			if (IsA(elem, GraphVertex))
+			{
+				GraphVertex *gvertex = (GraphVertex *) elem;
+
+				if (gvertex->create && OidIsValid(gvertex->relid) &&
+					list_member_oid(read_relids, gvertex->relid))
+					return true;
+			}
+			else if (IsA(elem, GraphEdge))
+			{
+				GraphEdge  *gedge = (GraphEdge *) elem;
+
+				/* an edge in a CREATE/MERGE pattern is always created */
+				if (OidIsValid(gedge->relid) &&
+					list_member_oid(read_relids, gedge->relid))
+					return true;
+			}
+		}
+	}
+
+	return false;
+}
+
+/*
+ * markScannedWritesEager
+ *		Recursively mark as eager every streaming CREATE/MERGE clause below
+ *		this query that creates elements in one of the given label relations.
+ */
+static void
+markScannedWritesEager(Query *qry, List *read_relids)
+{
+	ListCell   *lc;
+
+	check_stack_depth();
+
+	foreach(lc, qry->rtable)
+	{
+		RangeTblEntry *rte = lfirst(lc);
+		Query	   *subqry;
+
+		if (rte->rtekind != RTE_SUBQUERY || rte->subquery == NULL)
+			continue;
+		subqry = rte->subquery;
+
+		if (subqry->commandType == CMD_GRAPHWRITE &&
+			!subqry->g_eager &&
+			subqry->g_pattern != NIL &&
+			graphPatternCreatesInto(subqry->g_pattern, read_relids))
+		{
+			subqry->g_eager = true;
+
+			if (enable_eager == false)
+				elog(ERROR, "eagerness plan is not allowed.");
+		}
+
+		if (subqry->commandType == CMD_GRAPHWRITE ||
+			subqry->hasGraphwriteClause)
+			markScannedWritesEager(subqry, read_relids);
+	}
+}
+
+/*
+ * forceEagerWritesBeforeRead
+ *
+ * Make every graph write that this MATCH may observe physically happen
+ * before the MATCH scans the heap.
+ *
+ * Cross-clause visibility relies on per-clause command-id windows: a MATCH
+ * after a write clause reads at a command id that already sees the writes.
+ * That works only if the writes have actually happened when the scan runs.
+ * A SET/REMOVE/DELETE clause that is not the statement's last clause is
+ * always eager (assign_query_eager), so the pre-drain barrier runs it before
+ * any later read.  But a non-last CREATE (or a MERGE with no SET items)
+ * streams: it inserts as its rows are pulled, and a later MATCH's plan may
+ * scan the created elements' label before pulling the write side at all --
+ * a hash join builds or prefetches one input first -- so freshly created
+ * elements are missed even though the command-id arithmetic would make them
+ * visible.
+ *
+ * So when a MATCH has a graph write anywhere below it, force every streaming
+ * CREATE/MERGE that creates into a label this MATCH may scan (its pattern's
+ * labels, including sub-labels via inheritance; an unlabeled node or
+ * relationship reads every label of its kind) to run as eager.  Creations
+ * into labels the pattern cannot touch keep streaming, so plans lose nothing
+ * when the write and the read are disjoint.
+ */
+static void
+forceEagerWritesBeforeRead(Query *qry, List *pattern)
+{
+	Oid			graph_oid = get_graph_path_oid();
+	List	   *read_relids = NIL;
+	ListCell   *lp;
+
+	/* Collect the label relations this MATCH pattern may scan. */
+	foreach(lp, pattern)
+	{
+		CypherPath *cpath = lfirst(lp);
+		ListCell   *le;
+
+		foreach(le, cpath->chain)
+		{
+			Node	   *elem = lfirst(le);
+
+			if (IsA(elem, CypherNode))
+			{
+				char	   *labname = getCypherName(((CypherNode *) elem)->label);
+
+				read_relids = addLabelReadRelids(read_relids,
+												 labname != NULL ? labname : AG_VERTEX,
+												 AG_VERTEX, graph_oid);
+			}
+			else
+			{
+				CypherRel  *crel = (CypherRel *) elem;
+
+				if (crel->types == NIL)
+				{
+					read_relids = addLabelReadRelids(read_relids, AG_EDGE,
+													 AG_EDGE, graph_oid);
+				}
+				else
+				{
+					ListCell   *lt;
+
+					foreach(lt, crel->types)
+					{
+						char	   *typname = getCypherName(lfirst(lt));
+
+						read_relids = addLabelReadRelids(read_relids, typname,
+														 AG_EDGE, graph_oid);
+					}
+				}
+			}
+		}
+	}
+
+	markScannedWritesEager(qry, read_relids);
+
+	list_free(read_relids);
 }
 
 static ParseNamespaceItem *

@@ -697,9 +697,90 @@ MATCH (x:never_created_label) RETURN count(x) AS should_be_0;
  0
 (1 row)
 
+-- A write clause must apply to every row that reaches it no matter how (or
+-- whether) the reading side of the plan consumes its output.
+CREATE VLABEL wb1;
+CREATE VLABEL wb2;
+CREATE (:wb1 {i: 0, v: 0}), (:wb1 {i: 1, v: 0}), (:wb1 {i: 2, v: 0});
+-- A hash join whose other input is empty returns before ever pulling the
+-- side that contains the write clauses; the writes must still happen.
+MATCH (x:wb1) SET x.v = 9 WITH x MATCH (z:wb2) WHERE z.i = x.i
+RETURN count(*) AS no_rows;
+ no_rows 
+---------
+ 0
+(1 row)
+
+MATCH (x:wb1) RETURN x.i, x.v ORDER BY x.i;
+ i | v 
+---+---
+ 0 | 9
+ 1 | 9
+ 2 | 9
+(3 rows)
+
+-- A trailing read must observe the writes even when a Sort sits between the
+-- write and the join, whatever side the join builds/prefetches first.
+SET enable_mergejoin = off;
+MATCH (x:wb1) SET x.v = 3 WITH x ORDER BY x.i WITH x
+MATCH (y:wb1) WHERE y.i = x.i
+RETURN sum(y.v) AS should_be_9;
+ should_be_9 
+-------------
+ 9
+(1 row)
+
+SET enable_mergejoin = on;
+-- A non-last CREATE streams; when a later MATCH scans the created label, the
+-- creation is forced eager so the scan cannot run first and miss the rows.
+MATCH (x:wb1) CREATE (:wb2 {i: x.i}) WITH x
+MATCH (z:wb2) WHERE z.i = x.i
+RETURN count(*) AS should_be_3;
+ should_be_3 
+-------------
+ 3
+(1 row)
+
+MATCH (z:wb2) RETURN count(*) AS wb2_total;
+ wb2_total 
+-----------
+ 3
+(1 row)
+
+EXPLAIN (COSTS OFF)
+MATCH (x:wb1) CREATE (:wb2 {i: x.i}) WITH x MATCH (z:wb2) RETURN count(*);
+                  QUERY PLAN                   
+-----------------------------------------------
+ Aggregate
+   ->  Nested Loop
+         ->  Subquery Scan on _agens_default_s
+               ->  Graph Create eager
+                     ->  Seq Scan on wb1 x
+         ->  Materialize
+               ->  Seq Scan on wb2 z
+(7 rows)
+
+-- ... but a creation into a label the trailing pattern cannot touch keeps
+-- streaming (the eager forcing is label-aware, including inheritance).
+CREATE VLABEL wb3;
+EXPLAIN (COSTS OFF)
+MATCH (x:wb1) CREATE (:wb3 {i: x.i}) WITH x MATCH (z:wb2) RETURN count(*);
+                  QUERY PLAN                   
+-----------------------------------------------
+ Aggregate
+   ->  Nested Loop
+         ->  Subquery Scan on _agens_default_s
+               ->  Graph Create
+                     ->  Seq Scan on wb1 x
+         ->  Materialize
+               ->  Seq Scan on wb2 z
+(7 rows)
+
+MATCH (n:wb1) DETACH DELETE n;
+MATCH (n:wb2) DETACH DELETE n;
 -- cleanup
 DROP GRAPH eager_graph CASCADE;
-NOTICE:  drop cascades to 14 other objects
+NOTICE:  drop cascades to 17 other objects
 DETAIL:  drop cascades to sequence eager_graph.ag_label_seq
 drop cascades to vlabel ag_vertex
 drop cascades to elabel ag_edge
@@ -714,3 +795,6 @@ drop cascades to vlabel we_b
 drop cascades to vlabel we_c
 drop cascades to elabel we_rel
 drop cascades to vlabel read_after_create
+drop cascades to vlabel wb1
+drop cascades to vlabel wb2
+drop cascades to vlabel wb3
