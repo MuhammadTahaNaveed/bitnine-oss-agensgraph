@@ -4975,7 +4975,9 @@ create_modifygraph_plan(PlannerInfo *root, ModifyGraphPath *best_path)
 
 	plan = make_modifygraph(root, best_path->operation, best_path->last,
 							subplan, best_path->nr_modify, best_path->detach,
-							best_path->eagerness, best_path->pattern,
+							best_path->eagerness, best_path->writeGateAttno,
+							best_path->accumulate, best_path->accumOwnValues,
+							best_path->pattern,
 							best_path->exprs, best_path->sets,
 							best_path->resultRelations,
 							best_path->withCheckOptionLists,
@@ -7634,7 +7636,8 @@ is_projection_capable_plan(Plan *plan)
 ModifyGraph *
 make_modifygraph(PlannerInfo *root, GraphWriteOp operation, bool last,
 				 Plan *subplan, uint32 nr_modify, bool detach,
-				 bool eagerness, List *pattern, List *exprs, List *sets,
+				 bool eagerness, AttrNumber writeGateAttno, bool accumulate,
+				 bool accumOwnValues, List *pattern, List *exprs, List *sets,
 				 List *resultRelations, List *withCheckOptionLists,
 				 int epqParam)
 {
@@ -7646,6 +7649,9 @@ make_modifygraph(PlannerInfo *root, GraphWriteOp operation, bool last,
 	node->nr_modify = nr_modify;
 	node->detach = detach;
 	node->eagerness = eagerness;
+	node->writeGateAttno = writeGateAttno;
+	node->accumulate = accumulate;
+	node->accumOwnValues = accumOwnValues;
 	node->pattern = pattern;
 	node->exprs = exprs;
 	node->sets = sets;

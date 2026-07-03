@@ -449,6 +449,19 @@ transformRangeSubselect(ParseState *pstate, RangeSubselect *r)
 		elog(ERROR, "unexpected non-SELECT command in subquery in FROM");
 
 	/*
+	 * A graph write executes as part of the Cypher clause pipeline; inside a
+	 * FROM subquery its plan could be read partially, more than once, or not
+	 * at all, and the executor machinery that orders writes against reads
+	 * does not reach it.  The Cypher grammar keeps write clauses out of
+	 * FROM-embedded queries; a CALL subquery with a write body is caught
+	 * here.
+	 */
+	if (query->hasGraphwriteClause)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("a graph write is not allowed in a subquery in FROM")));
+
+	/*
 	 * OK, build an RTE and nsitem for the subquery.
 	 */
 	return addRangeTableEntryForSubquery(pstate,

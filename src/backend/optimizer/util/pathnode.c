@@ -3934,6 +3934,8 @@ ModifyGraphPath *
 create_modifygraph_path(PlannerInfo *root, RelOptInfo *rel,
 						GraphWriteOp operation, bool last, Path *subpath,
 						uint32 nr_modify, bool detach, bool eager,
+						AttrNumber writeGateAttno, bool accumulate,
+						bool accumOwnValues,
 						List *pattern, List *exprs, List *sets,
 						List *resultRelations, List *withCheckOptionLists,
 						int epqParam)
@@ -3958,6 +3960,9 @@ create_modifygraph_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->nr_modify = nr_modify;
 	pathnode->detach = detach;
 	pathnode->eagerness = eager;
+	pathnode->writeGateAttno = writeGateAttno;
+	pathnode->accumulate = accumulate;
+	pathnode->accumOwnValues = accumOwnValues;
 	pathnode->pattern = pattern;
 	pathnode->exprs = exprs;
 	pathnode->sets = sets;

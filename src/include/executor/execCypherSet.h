@@ -16,6 +16,8 @@
 
 extern TupleTableSlot *LegacyExecSetGraph(ModifyGraphState *mgstate,
 										  TupleTableSlot *slot, GSPKind kind);
+extern TupleTableSlot *ExecSetGraphAccum(ModifyGraphState *mgstate,
+										 TupleTableSlot *slot);
 extern TupleTableSlot *ExecSetGraph(ModifyGraphState *mgstate,
 									TupleTableSlot *slot);
 extern ItemPointer LegacyUpdateElemProp(ModifyGraphState *mgstate, Oid elemtype,

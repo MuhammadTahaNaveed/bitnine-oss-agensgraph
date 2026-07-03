@@ -775,6 +775,8 @@ static bool has_internal_default_prefix(char *str);
 %type <node>	cypher_load
 %type <node>	cypher_call
 %type <list>	cypher_call_import_opt cypher_call_import_vars
+%type <node>	cypher_call_body_stmt cypher_call_body_prev
+				cypher_call_body_head
 
 /*
  * Non-keyword token types.  These are hard-wired into the "flex" lexer.
@@ -22175,7 +22177,7 @@ cypher_for:
  * begins with WITH.
  */
 cypher_call:
-			CALL_LA cypher_call_import_opt '{' cypher_read_stmt '}'
+			CALL_LA cypher_call_import_opt '{' cypher_call_body_stmt '}'
 				{
 					CypherCallClause *n;
 
@@ -22186,7 +22188,7 @@ cypher_call:
 					$$ = (Node *) n;
 				}
 			| CALL_LA cypher_call_import_opt '{' WITH cypher_call_import_vars
-			  cypher_read_stmt '}'
+			  cypher_call_body_stmt '}'
 				{
 					CypherCallClause *n;
 
@@ -22196,7 +22198,7 @@ cypher_call:
 					n->location = @1;
 					$$ = (Node *) n;
 				}
-			| CALL_LA '(' '*' ')' '{' cypher_read_stmt '}'
+			| CALL_LA '(' '*' ')' '{' cypher_call_body_stmt '}'
 				{
 					CypherCallClause *n;
 
@@ -22206,6 +22208,59 @@ cypher_call:
 					n->location = @1;
 					$$ = (Node *) n;
 				}
+		;
+
+/*
+ * A CALL body is an arbitrary clause chain -- read clauses, write clauses, or
+ * both -- optionally combined with set operations, and may open with SET,
+ * REMOVE or DELETE directly on the imported variables (clauses that cannot
+ * head a top-level statement).  What the chain is allowed to mean -- a
+ * read body must end in RETURN, which write shapes are supported, where a
+ * write body may appear -- is decided at analysis time, where the errors can
+ * say more than "syntax error".
+ */
+cypher_call_body_stmt:
+			cypher_call_body_prev
+				{
+					CypherStmt *n;
+
+					n = makeNode(CypherStmt);
+					n->last = $1;
+					$$ = (Node *) n;
+				}
+			| cypher_call_body_stmt UNION set_quantifier cypher_call_body_stmt
+					{ $$ = makeCypherSetOp(SETOP_UNION, $3 == SET_QUANTIFIER_ALL, $1, $4); }
+			| cypher_call_body_stmt INTERSECT set_quantifier cypher_call_body_stmt
+					{ $$ = makeCypherSetOp(SETOP_INTERSECT, $3 == SET_QUANTIFIER_ALL, $1, $4); }
+			| cypher_call_body_stmt EXCEPT set_quantifier cypher_call_body_stmt
+					{ $$ = makeCypherSetOp(SETOP_EXCEPT, $3 == SET_QUANTIFIER_ALL, $1, $4); }
+		;
+
+cypher_call_body_prev:
+			cypher_call_body_head
+				{
+					CypherClause *n;
+
+					n = makeNode(CypherClause);
+					n->detail = $1;
+					$$ = (Node *) n;
+				}
+			| cypher_call_body_prev cypher_clause
+				{
+					CypherClause *n;
+
+					n = makeNode(CypherClause);
+					n->detail = $2;
+					n->prev = $1;
+					$$ = (Node *) n;
+				}
+		;
+
+cypher_call_body_head:
+			cypher_clause_head
+			| cypher_set
+			| cypher_remove
+			| cypher_delete
 		;
 
 cypher_call_import_opt:

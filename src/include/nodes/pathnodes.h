@@ -2436,6 +2436,12 @@ typedef struct ModifyGraphPath
 	int			epqParam;
 	List	   *resultRelations;
 	List	   *withCheckOptionLists;
+	/* skip the write for a row whose gate column is NULL (0 = no gate) */
+	AttrNumber	writeGateAttno;
+	/* evaluate SET items against per-row accumulated element state */
+	bool		accumulate;
+	/* surface each row's own accumulated value (a returning CALL body) */
+	bool		accumOwnValues;
 } ModifyGraphPath;
 
 typedef struct ShortestpathPath

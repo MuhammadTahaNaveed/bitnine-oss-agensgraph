@@ -207,7 +207,8 @@ ExecInitModifyGraph(ModifyGraph *mgplan, EState *estate, int eflags)
 			mgstate->execProc = ExecDeleteGraph;
 			break;
 		case GWROP_SET:
-			mgstate->execProc = ExecSetGraph;
+			mgstate->execProc = mgplan->accumulate ? ExecSetGraphAccum :
+				ExecSetGraph;
 			break;
 		case GWROP_MERGE:
 			mgstate->execProc = ExecMergeGraph;
@@ -303,6 +304,64 @@ reflectTupleChanges(PlanState *pstate, TupleTableSlot *result)
 		{
 			continue;
 		}
+
+		setSlotValueByAttnum(result, elem, i + 1);
+	}
+}
+
+/*
+ * reflectTupleTids
+ *
+ * Refresh the tuple id inside each element of an output row from the
+ * modified-element table, keeping the row's own property values.  Used by
+ * accumulating clauses that surface per-row values: the flush at clause end
+ * rewrote each element's heap tuple, so only the id needs updating for a
+ * later write clause to find the current version.
+ */
+static void
+reflectTupleTids(PlanState *pstate, TupleTableSlot *result)
+{
+	ModifyGraphState *mgstate = castNode(ModifyGraphState, pstate);
+	TupleDesc	tupDesc = result->tts_tupleDescriptor;
+	int			natts = tupDesc->natts;
+	int			i;
+
+	for (i = 0; i < natts; i++)
+	{
+		Oid			type;
+		Datum		elem;
+		Datum		gid;
+		Datum		final_elem;
+		bool		found;
+
+		if (result->tts_isnull[i])
+			continue;
+
+		type = TupleDescAttr(tupDesc, i)->atttypid;
+		if (type != VERTEXOID && type != EDGEOID)
+			continue;
+
+		elem = result->tts_values[i];
+		if (graphElementIdIsNull(elem, type))
+			continue;
+
+		gid = (type == VERTEXOID) ? getVertexIdDatum(elem) :
+			getEdgeIdDatum(elem);
+
+		final_elem = getElementFromEleTable(mgstate, type, elem, gid, &found);
+		if (!found || final_elem == (Datum) 0)
+			continue;
+
+		if (type == VERTEXOID)
+			elem = makeGraphVertexDatum(getVertexIdDatum(elem),
+										getVertexPropDatum(elem),
+										getVertexTidDatum(final_elem));
+		else
+			elem = makeGraphEdgeDatum(getEdgeIdDatum(elem),
+									  getEdgeStartDatum(elem),
+									  getEdgeEndDatum(elem),
+									  getEdgePropDatum(elem),
+									  getEdgeTidDatum(final_elem));
 
 		setSlotValueByAttnum(result, elem, i + 1);
 	}
@@ -423,6 +482,22 @@ execModifyGraphChild(ModifyGraphState *mgstate)
 		if (TupIsNull(slot))
 			break;
 
+		/*
+		 * A gated row (no match on the write-gate column) is passed through
+		 * untouched: the write, its triggers, and its statistics all skip.
+		 */
+		if (plan->writeGateAttno != InvalidAttrNumber)
+		{
+			bool		gatenull;
+
+			(void) slot_getattr(slot, plan->writeGateAttno, &gatenull);
+			if (gatenull)
+			{
+				tuplestore_puttupleslot(mgstate->tuplestorestate, slot);
+				continue;
+			}
+		}
+
 		slot = mgstate->execProc(mgstate, slot);
 
 		Assert(mgstate->eagerness);
@@ -437,7 +512,7 @@ execModifyGraphChild(ModifyGraphState *mgstate)
 
 	if (mgstate->elemTable != NULL
 		&& plan->operation != GWROP_DELETE
-		&& plan->operation != GWROP_SET)
+		&& (plan->operation != GWROP_SET || plan->accumulate))
 		reflectModifiedProp(mgstate);
 }
 
@@ -615,6 +690,20 @@ ExecModifyGraph(PlanState *pstate)
 				if (TupIsNull(slot))
 					break;
 
+				/* see the gate note in execModifyGraphChild */
+				if (plan->writeGateAttno != InvalidAttrNumber)
+				{
+					bool		gatenull;
+
+					(void) slot_getattr(slot, plan->writeGateAttno, &gatenull);
+					if (gatenull)
+					{
+						if (plan->last)
+							continue;
+						return slot;
+					}
+				}
+
 				slot = mgstate->execProc(mgstate, slot);
 
 				/*
@@ -638,7 +727,7 @@ ExecModifyGraph(PlanState *pstate)
 
 			if (mgstate->elemTable != NULL
 				&& plan->operation != GWROP_DELETE
-				&& plan->operation != GWROP_SET)
+				&& (plan->operation != GWROP_SET || plan->accumulate))
 				reflectModifiedProp(mgstate);
 		}
 	}
@@ -659,6 +748,21 @@ ExecModifyGraph(PlanState *pstate)
 		if (mgstate->elemTable == NULL ||
 			hash_get_num_entries(mgstate->elemTable) < 1)
 			return result;
+
+		/*
+		 * A returning CALL body surfaces each row's own accumulated value:
+		 * keep the buffered properties, but refresh the tuple id -- the
+		 * clause-end flush superseded the version captured at scan time, and
+		 * a later write clause updating through a stale id would fail with
+		 * "attempted to update invisible tuple".  Everything else (including
+		 * a unit CALL body, whose collapsed output must carry the final
+		 * state) substitutes the final element.
+		 */
+		if (plan->accumOwnValues)
+		{
+			reflectTupleTids(pstate, result);
+			return result;
+		}
 
 		reflectTupleChanges(pstate, result);
 

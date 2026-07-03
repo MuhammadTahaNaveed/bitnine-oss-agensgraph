@@ -1616,6 +1616,12 @@ typedef struct ModifyGraph
 	int			resultRelIndex; /* start index of es_result_relations for
 								 * current plan */
 	List	   *withCheckOptionLists;
+	/* skip the write for a row whose gate column is NULL (0 = no gate) */
+	AttrNumber	writeGateAttno;
+	/* evaluate SET items against per-row accumulated element state */
+	bool		accumulate;
+	/* surface each row's own accumulated value (a returning CALL body) */
+	bool		accumOwnValues;
 } ModifyGraph;
 
 typedef struct GraphVLE

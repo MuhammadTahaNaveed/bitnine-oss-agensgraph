@@ -48,6 +48,8 @@ extern Query *transformCypherFilterClause(ParseState *pstate,
 										  CypherClause *clause);
 extern Query *transformCypherForClause(ParseState *pstate,
 									   CypherClause *clause);
+extern Query *transformCypherCallBoundary(ParseState *pstate,
+										  CypherClause *clause);
 extern Query *transformCypherCallClause(ParseState *pstate,
 										CypherClause *clause);
 extern Query *transformCypherCountClause(ParseState *pstate,
@@ -55,6 +57,7 @@ extern Query *transformCypherCountClause(ParseState *pstate,
 extern TargetEntry *makeCountTargetEntry(ParseState *pstate);
 
 extern bool IsGraphWriteClause(Node *clause);
+extern bool CypherCallEndsInWrite(CypherCallClause *detail);
 
 /*
  * Build a FieldSelect that extracts the named field of a composite expression;

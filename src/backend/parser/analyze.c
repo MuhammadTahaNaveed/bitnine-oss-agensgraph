@@ -3674,6 +3674,11 @@ transformCypherStmt(ParseState *pstate, CypherStmt *stmt)
 		case T_CypherSetClause:
 		case T_CypherMergeClause:
 			break;
+		case T_CypherCallClause:
+			/* a CALL whose body is a unit write subquery works like one */
+			if (!CypherCallEndsInWrite((CypherCallClause *) clause->detail))
+				valid = false;
+			break;
 		default:
 			valid = false;
 			break;
@@ -3764,6 +3769,9 @@ transformCypherClause(ParseState *pstate, CypherClause *clause)
 			break;
 		case T_CypherCallClause:
 			qry = transformCypherCallClause(pstate, clause);
+			break;
+		case T_CypherCallBoundary:
+			qry = transformCypherCallBoundary(pstate, clause);
 			break;
 		case T_CypherModifier:
 			qry = transformCypherModifier(pstate, clause);

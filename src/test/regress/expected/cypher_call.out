@@ -537,27 +537,7 @@ RETURN p.name AS outer_name, dog ORDER BY dog;
 (2 rows)
 
 -- 1.6 errors ----------------------------------------------------------------
--- a write clause is not allowed in a CALL subquery (each write kind)
-MATCH (p:Person) CALL (p) { CREATE (:Foo {n: p.name}) RETURN 1 AS one } RETURN p.name;
-ERROR:  syntax error at or near "CREATE"
-LINE 1: MATCH (p:Person) CALL (p) { CREATE (:Foo {n: p.name}) RETURN...
-                                    ^
-MATCH (p:Person) CALL (p) { SET p.x = 1 RETURN p.name AS n } RETURN p.name;
-ERROR:  syntax error at or near "SET"
-LINE 1: MATCH (p:Person) CALL (p) { SET p.x = 1 RETURN p.name AS n }...
-                                    ^
-MATCH (p:Person) CALL (p) { DETACH DELETE p RETURN 1 AS one } RETURN p.name;
-ERROR:  syntax error at or near "DETACH"
-LINE 1: MATCH (p:Person) CALL (p) { DETACH DELETE p RETURN 1 AS one ...
-                                    ^
-MATCH (p:Person) CALL (p) { MERGE (:Foo {n: p.name}) RETURN 1 AS one } RETURN p.name;
-ERROR:  syntax error at or near "MERGE"
-LINE 1: MATCH (p:Person) CALL (p) { MERGE (:Foo {n: p.name}) RETURN ...
-                                    ^
-MATCH (p:Person) CALL (p) { REMOVE p.age RETURN p.name AS n } RETURN p.name;
-ERROR:  syntax error at or near "REMOVE"
-LINE 1: MATCH (p:Person) CALL (p) { REMOVE p.age RETURN p.name AS n ...
-                                    ^
+-- write bodies are covered in section 7
 -- the subquery must return at least one variable
 MATCH (p:Person) CALL (p) { MATCH (p)-[:HAS_DOG]->(d:Dog) FINISH } RETURN p.name;
 ERROR:  CALL subquery must RETURN at least one variable
@@ -1197,9 +1177,607 @@ SELECT "call" FROM (SELECT 1 AS "call") s;
     1
 (1 row)
 
+--
+-- 7. Write bodies
+--
+-- A CALL body may write.  It behaves exactly as if the body's clauses were
+-- written inline in the pipeline, plus strict import scoping and unit-
+-- subquery cardinality: a body with no RETURN outputs exactly the input
+-- rows; a body ending in RETURN outputs input rows x returned rows.  Each
+-- execution of the body observes the previous executions' updates (the SETs
+-- of such bodies evaluate against per-row accumulated element state).
+-- Everything here runs on its own labels so the read sections above stay
+-- untouched.
+--
+-- 7.1 terminal unit bodies -------------------------------------------------
+CREATE (:WP {name: 'ann', age: 30}), (:WP {name: 'bob', age: 40});
+-- write-only body
+MATCH (w:WP) CALL (w) { SET w.mark = 1 };
+MATCH (w:WP) RETURN w.name, w.mark ORDER BY w.name;
+ name  | mark 
+-------+------
+ "ann" | 1
+ "bob" | 1
+(2 rows)
+
+-- importing-WITH form
+MATCH (w:WP) CALL { WITH w SET w.mark = 2 };
+MATCH (w:WP) RETURN w.name, w.mark ORDER BY w.name;
+ name  | mark 
+-------+------
+ "ann" | 2
+ "bob" | 2
+(2 rows)
+
+-- CALL (*) form
+MATCH (w:WP) CALL (*) { SET w.mark = 3 };
+MATCH (w:WP) RETURN w.name, w.mark ORDER BY w.name;
+ name  | mark 
+-------+------
+ "ann" | 3
+ "bob" | 3
+(2 rows)
+
+-- body with a MATCH: writes fire per matched row; a row that matches nothing
+-- contributes nothing (there is no output to preserve at terminal position)
+MATCH (w:WP {name: 'ann'}) CALL (w) { MATCH (o:WP) SET o.seen = w.name };
+MATCH (w:WP) RETURN w.name, w.seen ORDER BY w.name;
+ name  | seen  
+-------+-------
+ "ann" | "ann"
+ "bob" | "ann"
+(2 rows)
+
+-- CALL as the statement's first clause: the body runs on one empty row
+CALL () { CREATE (:WSOLO {v: 1}) };
+MATCH (s:WSOLO) RETURN count(*) AS solos;
+ solos 
+-------
+ 1
+(1 row)
+
+-- a terminal write body streams like the inlined terminal write
+EXPLAIN (COSTS OFF) MATCH (w:WP) CALL (w) { SET w.mark = 9 };
+       QUERY PLAN       
+------------------------
+ Graph Set
+   ->  Seq Scan on wp w
+(2 rows)
+
+-- 7.2 mid-pipeline unit bodies, one row in = one row out ---------------------
+MATCH (w:WP) CALL (w) { SET w.tag = 1 } RETURN w.name, w.tag ORDER BY w.name;
+ name  | tag 
+-------+-----
+ "ann" | 1
+ "bob" | 1
+(2 rows)
+
+-- the body's own variables do not leak past the CALL
+MATCH (w:WP) CALL (w) { CREATE (z:WLOG {of: w.name}) } RETURN z;
+ERROR:  variable does not exist
+LINE 1: ...H (w:WP) CALL (w) { CREATE (z:WLOG {of: w.name}) } RETURN z;
+                                                                     ^
+MATCH (w:WP) CALL (w) { CREATE (z:WLOG {of: w.name}) } RETURN w.name ORDER BY w.name;
+ name  
+-------
+ "ann"
+ "bob"
+(2 rows)
+
+MATCH (l:WLOG) RETURN count(*) AS logs;
+ logs 
+------
+ 2
+(1 row)
+
+-- two write-CALLs in one pipeline
+MATCH (w:WP) CALL (w) { SET w.s1 = 1 } CALL (w) { SET w.s2 = 2 }
+RETURN w.name, w.s1, w.s2 ORDER BY w.name;
+ name  | s1 | s2 
+-------+----+----
+ "ann" | 1  | 2
+ "bob" | 1  | 2
+(2 rows)
+
+-- writes are visible to the clauses after the CALL
+MATCH (w:WP) CALL (w) { SET w.vis = 5 } WITH w
+MATCH (m:WP {name: w.name}) RETURN m.name, m.vis ORDER BY m.name;
+ name  | vis 
+-------+-----
+ "ann" | 5
+ "bob" | 5
+(2 rows)
+
+-- an outer write, a body write on the same element, and a trailing read
+MATCH (w:WP {name: 'ann'}) SET w.w1 = 10 CALL (w) { SET w.w2 = 20 } RETURN w.name;
+ name  
+-------
+ "ann"
+(1 row)
+
+MATCH (w:WP {name: 'ann'}) RETURN w.w1, w.w2;
+ w1 | w2 
+----+----
+ 10 | 20
+(1 row)
+
+-- a body MATCH on a label created by a preceding outer clause
+CREATE (:WNEW {v: 1}) WITH 1 AS one CALL () { MATCH (t:WNEW) SET t.x = 1 };
+MATCH (t:WNEW) RETURN t.v, t.x;
+ v | x 
+---+---
+ 1 | 1
+(1 row)
+
+-- an outer MATCH on a label created only inside the body
+CALL () { CREATE (:WFRESH {v: 7}) } MATCH (f:WFRESH) RETURN f.v;
+ v 
+---
+ 7
+(1 row)
+
+-- 7.3 mid-pipeline unit bodies whose reads multiply or drop rows -------------
+CREATE (:WD {name: 'fido'})<-[:HASD]-(:WP2 {name: 'peter'})-[:HASD]->(:WD {name: 'ozzy'});
+CREATE (:WP2 {name: 'timothy'});
+-- every input row comes out exactly once; matched rows write
+MATCH (o:WP2) CALL (o) { MATCH (o)-[e:HASD]->(d:WD) SET d.owner = o.name }
+RETURN o.name ORDER BY o.name;
+   name    
+-----------
+ "peter"
+ "timothy"
+(2 rows)
+
+MATCH (d:WD) RETURN d.name, d.owner ORDER BY d.name;
+  name  |  owner  
+--------+---------
+ "fido" | "peter"
+ "ozzy" | "peter"
+(2 rows)
+
+-- a gated CREATE: only rows whose pattern matched create
+MATCH (o:WP2) CALL (o) { MATCH (o)-[e:HASD]->(d:WD) CREATE (:WCOPY {of: d.name}) }
+RETURN o.name ORDER BY o.name;
+   name    
+-----------
+ "peter"
+ "timothy"
+(2 rows)
+
+MATCH (c:WCOPY) RETURN c.of ORDER BY c.of;
+   of   
+--------
+ "fido"
+ "ozzy"
+(2 rows)
+
+-- DELETE of matched elements; 0-match rows still come out
+MATCH (o:WP2) CALL (o) { MATCH (o)-[e:HASD]->(d:WD) DELETE e }
+RETURN o.name ORDER BY o.name;
+   name    
+-----------
+ "peter"
+ "timothy"
+(2 rows)
+
+MATCH ()-[e:HASD]->() RETURN count(*) AS remaining;
+ remaining 
+-----------
+ 0
+(1 row)
+
+-- duplicate input rows each count once
+MATCH (o:WP2 {name: 'peter'}), (x:WP2)
+CALL (o) { MATCH (o)-[e2:HASD2]->(d:WD) SET d.z = 1 }
+RETURN o.name, x.name ORDER BY x.name;
+  name   |   name    
+---------+-----------
+ "peter" | "peter"
+ "peter" | "timothy"
+(2 rows)
+
+-- the unit-cardinality plan: number the input rows, LEFT-join the body's
+-- match, gate the write, collapse back to one row per input
+EXPLAIN (COSTS OFF)
+MATCH (o:WP2) CALL (o) { MATCH (o)-[e:HASD]->(d:WD) SET d.owner = o.name }
+RETURN o.name;
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
+ Subquery Scan on _agens_default_s
+   ->  Unique
+         ->  Sort
+               Sort Key: _agens_default_s_1."?dropped?column?"
+               ->  Subquery Scan on _agens_default_s_1
+                     ->  Graph Set eager
+                           ->  Merge Right Join
+                                 Merge Cond: (start = ((o).id))
+                                 ->  Sort
+                                       Sort Key: start
+                                       ->  Hash Join
+                                             Hash Cond: ("end" = id)
+                                             ->  Seq Scan on hasd e
+                                             ->  Hash
+                                                   ->  Seq Scan on wd d
+                                 ->  Sort
+                                       Sort Key: ((o).id)
+                                       ->  Subquery Scan on _agens_default_s
+                                             ->  WindowAgg
+                                                   ->  Seq Scan on wp2 o
+(20 rows)
+
+-- 7.4 returning bodies ------------------------------------------------------
+-- output = input rows x returned rows; writes fire per body row
+MATCH (w:WP) CALL (w) { CREATE (l:WLOG2 {of: w.name}) RETURN l.of AS made }
+RETURN w.name, made ORDER BY w.name;
+ name  | made  
+-------+-------
+ "ann" | "ann"
+ "bob" | "bob"
+(2 rows)
+
+MATCH (w:WP {name: 'ann'}) CALL (w) { MATCH (o:WP) SET o.r1 = 1 RETURN o.name AS oname }
+RETURN w.name, oname ORDER BY oname;
+ name  | oname 
+-------+-------
+ "ann" | "ann"
+ "ann" | "bob"
+(2 rows)
+
+-- an input row with zero returned rows is dropped
+CREATE VLABEL WEMPTY;
+MATCH (w:WP) CALL (w) { MATCH (e:WEMPTY) SET e.x = 1 RETURN e.x AS ex } RETURN w.name;
+ name 
+------
+(0 rows)
+
+-- 7.5 each execution observes the previous executions' updates ---------------
+CREATE (:WCOUNTER {count: 0});
+UNWIND [0, 1, 2] AS x
+CALL () {
+  MATCH (n:WCOUNTER)
+  SET n.count = n.count + 1
+  RETURN n.count AS innerCount
+}
+WITH innerCount
+MATCH (n:WCOUNTER)
+RETURN innerCount, n.count AS totalCount;
+ innercount | totalcount 
+------------+------------
+ 1          | 3
+ 2          | 3
+ 3          | 3
+(3 rows)
+
+-- disjoint targets: the canonical increment-and-return
+MATCH (w:WP) CALL (w) { SET w.age = w.age + 1 RETURN w.age AS newAge }
+RETURN w.name, newAge ORDER BY w.name;
+ name  | newage 
+-------+--------
+ "ann" | 31
+ "bob" | 41
+(2 rows)
+
+MATCH (w:WP) RETURN w.name, w.age ORDER BY w.name;
+ name  | age 
+-------+-----
+ "ann" | 31
+ "bob" | 41
+(2 rows)
+
+-- a row-varying value on a shared element: the last row wins
+MATCH (n:WCOUNTER) SET n.v = 0;
+UNWIND [10, 20, 30] AS x MATCH (n:WCOUNTER) CALL (n, x) { SET n.v = x } RETURN x;
+ x  
+----
+ 10
+ 20
+ 30
+(3 rows)
+
+MATCH (n:WCOUNTER) RETURN n.v AS last_won;
+ last_won 
+----------
+ 30
+(1 row)
+
+-- SET += merges against the accumulated map
+MATCH (w:WP {name: 'ann'}) CALL (w) { SET w += {city: 'seoul'} } RETURN w.name;
+ name  
+-------
+ "ann"
+(1 row)
+
+MATCH (w:WP {name: 'ann'}) RETURN w.city;
+  city   
+---------
+ "seoul"
+(1 row)
+
+-- 7.6 import scoping ---------------------------------------------------------
+-- a non-imported outer variable does not exist inside the body
+MATCH (a:WP), (b:WP) CALL (a) { SET b.bad = 1 };
+ERROR:  variable does not exist
+LINE 1: MATCH (a:WP), (b:WP) CALL (a) { SET b.bad = 1 };
+                                            ^
+MATCH (a:WP) CALL () { CREATE (:WX {who: a.name}) };
+ERROR:  variable does not exist
+LINE 1: MATCH (a:WP) CALL () { CREATE (:WX {who: a.name}) };
+                                                 ^
+MATCH (a:WP) CALL (a) { MATCH (m:WP {name: a.nope}) SET m.y = b.z };
+ERROR:  variable does not exist
+LINE 1: ...:WP) CALL (a) { MATCH (m:WP {name: a.nope}) SET m.y = b.z };
+                                                                 ^
+-- an import must name an existing outer variable
+MATCH (a:WP) CALL (nosuch) { SET nosuch.x = 1 };
+ERROR:  variable "nosuch" to import into CALL does not exist
+LINE 1: MATCH (a:WP) CALL (nosuch) { SET nosuch.x = 1 };
+                     ^
+-- no preceding clause to import from
+CALL (a) { SET a.x = 1 };
+ERROR:  CALL has no preceding clause to import variables from
+LINE 1: CALL (a) { SET a.x = 1 };
+        ^
+-- 7.7 returned-name rules ----------------------------------------------------
+MATCH (w:WP) CALL (w) { SET w.x = 1 RETURN 1 AS w } RETURN w;
+ERROR:  variable "w" returned by the CALL subquery is already bound in the outer query
+LINE 1: MATCH (w:WP) CALL (w) { SET w.x = 1 RETURN 1 AS w } RETURN w...
+                     ^
+MATCH (w:WP) CALL (w) { SET w.x = 1 RETURN 1 AS a, 2 AS a } RETURN a;
+ERROR:  duplicate variable "a" returned by the CALL subquery
+LINE 1: MATCH (w:WP) CALL (w) { SET w.x = 1 RETURN 1 AS a, 2 AS a } ...
+                     ^
+-- 7.8 unsupported shapes are rejected, never silently different --------------
+-- reads that would observe the body's own writes
+MATCH (w:WP) CALL (w) { MATCH (m:WP) CREATE (:WP {c: 1}) };
+ERROR:  a CALL subquery body cannot create into a label its own MATCH reads
+LINE 1: MATCH (w:WP) CALL (w) { MATCH (m:WP) CREATE (:WP {c: 1}) };
+                     ^
+DETAIL:  Each execution of the body would observe the previous executions' creations.
+MATCH (w:WP) CALL (w) { MATCH (m) CREATE (:WANY {c: 1}) };
+ERROR:  a CALL subquery body cannot create into a label its own MATCH reads
+LINE 1: MATCH (w:WP) CALL (w) { MATCH (m) CREATE (:WANY {c: 1}) };
+                     ^
+DETAIL:  Each execution of the body would observe the previous executions' creations.
+MATCH (w:WP) CALL (w) { MATCH (m:WP) WHERE m.age > 0 SET m.age = 1 };
+ERROR:  the MATCH of a CALL subquery body cannot read a property the body writes
+LINE 1: MATCH (w:WP) CALL (w) { MATCH (m:WP) WHERE m.age > 0 SET m.a...
+                     ^
+DETAIL:  Each execution of the body would observe the previous executions' updates.
+MATCH (w:WP) CALL (w) { MATCH (m:WP {age: 30}) SET m.age = 31 };
+ERROR:  the MATCH of a CALL subquery body cannot read a property the body writes
+LINE 1: MATCH (w:WP) CALL (w) { MATCH (m:WP {age: 30}) SET m.age = 3...
+                     ^
+DETAIL:  Each execution of the body would observe the previous executions' updates.
+MATCH (w:WP) CALL (w) { SET w.age = 1 CREATE (:WA {v: w.age}) };
+ERROR:  a CALL subquery body cannot create from a property the body writes
+LINE 1: MATCH (w:WP) CALL (w) { SET w.age = 1 CREATE (:WA {v: w.age}...
+                     ^
+DETAIL:  Each execution of the body would observe the previous executions' updates.
+-- per-row shapes not supported yet
+MATCH (w:WP) CALL (w) { UNWIND [1,2] AS i CREATE (:WU {v: i}) };
+ERROR:  UNWIND is not supported in a CALL subquery body that writes yet
+LINE 1: MATCH (w:WP) CALL (w) { UNWIND [1,2] AS i CREATE (:WU {v: i}...
+                     ^
+MATCH (w:WP) CALL (w) { MATCH (a:WP) MATCH (b:WD) SET a.x = 1 };
+ERROR:  only one MATCH is supported in a CALL subquery body that writes
+LINE 1: MATCH (w:WP) CALL (w) { MATCH (a:WP) MATCH (b:WD) SET a.x = ...
+                     ^
+MATCH (w:WP) CALL (w) { OPTIONAL MATCH (m:WD) SET w.x = 1 };
+ERROR:  OPTIONAL MATCH is not supported in a CALL subquery body that writes
+LINE 1: MATCH (w:WP) CALL (w) { OPTIONAL MATCH (m:WD) SET w.x = 1 };
+                     ^
+MATCH (w:WP) CALL (w) { SET w.x = 1 WITH w SET w.y = 2 };
+ERROR:  WITH is not supported in a CALL subquery body that writes yet
+LINE 1: MATCH (w:WP) CALL (w) { SET w.x = 1 WITH w SET w.y = 2 };
+                     ^
+MATCH (w:WP) CALL (w) { CREATE (:WB) CALL (w) { SET w.q = 1 } };
+ERROR:  a CALL subquery is not supported inside a CALL subquery body that writes yet
+LINE 1: MATCH (w:WP) CALL (w) { CREATE (:WB) CALL (w) { SET w.q = 1 ...
+                     ^
+MATCH (w:WP) CALL (w) { MATCH (m:WD) SET m.x = 1 SET w.y = 1 MATCH (o:WP) SET o.z = 1 };
+ERROR:  a read after a write is not supported in a CALL subquery body
+LINE 1: MATCH (w:WP) CALL (w) { MATCH (m:WD) SET m.x = 1 SET w.y = 1...
+                     ^
+HINT:  Put the MATCH before the writes, or after the CALL.
+-- MERGE and DELETE stand alone
+MATCH (w:WP) CALL (w) { MERGE (:WM {k: 1}) SET w.x = 1 };
+ERROR:  MERGE and DELETE must be the only write clause in a CALL subquery body
+LINE 1: MATCH (w:WP) CALL (w) { MERGE (:WM {k: 1}) SET w.x = 1 };
+                     ^
+MATCH (w:WP) CALL (w) { DELETE w SET w.x = 1 };
+ERROR:  MERGE and DELETE must be the only write clause in a CALL subquery body
+LINE 1: MATCH (w:WP) CALL (w) { DELETE w SET w.x = 1 };
+                     ^
+MATCH (w:WP) CALL (w) { MATCH (d:WD) DELETE d RETURN 1 AS one } RETURN w.name;
+ERROR:  DELETE is not supported in a CALL subquery body that returns rows yet
+LINE 1: MATCH (w:WP) CALL (w) { MATCH (d:WD) DELETE d RETURN 1 AS on...
+                     ^
+-- modifiers, FINISH, UNION
+MATCH (w:WP) CALL (w) { MATCH (d:WD) LIMIT 1 SET d.x = 1 };
+ERROR:  unsupported clause in a CALL subquery body that writes
+LINE 1: MATCH (w:WP) CALL (w) { MATCH (d:WD) LIMIT 1 SET d.x = 1 };
+                     ^
+MATCH (w:WP) CALL (w) { SET w.x = 1 FINISH };
+ERROR:  Cypher query must end with RETURN, FINISH or update clause
+MATCH (w:WP) CALL (w) { SET w.x = 1 RETURN 1 AS a UNION SET w.y = 2 RETURN 2 AS a } RETURN a;
+ERROR:  UNION between CALL subquery bodies that write is not supported
+LINE 1: MATCH (w:WP) CALL (w) { SET w.x = 1 RETURN 1 AS a UNION SET ...
+                     ^
+-- the RETURN of a writing body keeps to plain items
+MATCH (w:WP) CALL (w) { SET w.x = 1 RETURN DISTINCT 1 AS a } RETURN a;
+ERROR:  DISTINCT, ORDER BY, SKIP and LIMIT are not supported in the RETURN of a CALL subquery body that writes yet
+LINE 1: MATCH (w:WP) CALL (w) { SET w.x = 1 RETURN DISTINCT 1 AS a }...
+                     ^
+MATCH (w:WP) CALL (w) { SET w.x = 1 RETURN count(*) AS a } RETURN a;
+ERROR:  aggregates are not supported in the RETURN of a CALL subquery body that writes yet
+LINE 1: MATCH (w:WP) CALL (w) { SET w.x = 1 RETURN count(*) AS a } R...
+                     ^
+-- a mid-pipeline body whose pattern binds no named new variable has nothing
+-- to gate its writes on
+MATCH (w:WP) CALL (w) { MATCH (w)-[:HASD]->(:WD) CREATE (:WC2) } RETURN w.name;
+ERROR:  the MATCH of a CALL subquery body must bind at least one named new variable
+LINE 1: MATCH (w:WP) CALL (w) { MATCH (w)-[:HASD]->(:WD) CREATE (:WC...
+                     ^
+HINT:  Name a node or relationship of the pattern; it indicates for each row whether the pattern matched.
+-- a writing CALL is a clause, not an expression
+MATCH (w:WP) WHERE EXISTS { MATCH (m:WP) CALL (m) { SET m.e = 1 } RETURN m } RETURN w;
+ERROR:  a CALL subquery that writes is only allowed as a clause of a Cypher query
+LINE 1: MATCH (w:WP) WHERE EXISTS { MATCH (m:WP) CALL (m) { SET m.e ...
+                                                 ^
+SELECT * FROM (MATCH (w:WP) CALL (w) { SET w.f = 1 } RETURN w.name) t;
+ERROR:  a graph write is not allowed in a subquery in FROM
+WITH t AS (MATCH (w:WP) CALL (w) { SET w.g = 1 } RETURN w.name AS n) SELECT * FROM t;
+ERROR:  a CALL subquery that writes is only allowed as a clause of a Cypher query
+LINE 1: WITH t AS (MATCH (w:WP) CALL (w) { SET w.g = 1 } RETURN w.na...
+                                ^
+-- a returning CALL cannot end the statement
+MATCH (w:WP) CALL (w) { SET w.x = 1 RETURN 1 AS a };
+ERROR:  Cypher query must end with RETURN, FINISH or update clause
+MATCH (w:WP) CALL (w) { MATCH (d:WD) RETURN d.name AS dn };
+ERROR:  Cypher query must end with RETURN, FINISH or update clause
+-- 7.8b regressions from adversarial review ----------------------------------
+-- an accumulating body composes with later writes on the same element
+CREATE (:WACC {c: 0, junk: 'x'});
+MATCH (n:WACC) CALL (n) { SET n.c = n.c + 1 REMOVE n.junk };
+MATCH (n:WACC) RETURN n.c, n.junk IS NULL AS junk_gone;
+ c | junk_gone 
+---+-----------
+ 1 | t
+(1 row)
+
+MATCH (n:WACC) CALL (n) { SET n.c = n.c + 1 } SET n.d = 1 RETURN n.c;
+ c 
+---
+ 2
+(1 row)
+
+MATCH (n:WACC) CALL (n) { SET n.a = n.c + 1 } CALL (n) { SET n.b = n.a + 5 } RETURN n.a, n.b;
+ a | b 
+---+---
+ 3 | 8
+(1 row)
+
+MATCH (n:WACC) CALL (n) { SET n.c = n.c + 1 } DELETE n RETURN count(*) AS gone;
+ gone 
+------
+ 1
+(1 row)
+
+MATCH (n:WACC) RETURN count(*) AS remaining;
+ remaining 
+-----------
+ 0
+(1 row)
+
+-- a unit body's collapsed output carries the final accumulated state
+CREATE (:WDG {name:'fido'})<-[:WOWNS]-(:WPO {name:'peter'})-[:WOWNS]->(:WDG {name:'ozzy'});
+MATCH (o:WPO) CALL (o) { MATCH (o)-[e:WOWNS]->(d:WDG) SET o.z = d.name }
+RETURN o.z AS returned;
+ returned 
+----------
+ "ozzy"
+(1 row)
+
+MATCH (o:WPO) RETURN o.z AS stored;
+ stored 
+--------
+ "ozzy"
+(1 row)
+
+-- reads the commutation checks cannot see are rejected
+UNWIND [1,2] AS x CALL () { MATCH (m:WPO) WHERE NOT jsonb_exists(properties(m), 'p') SET m.p = 1 RETURN 1 AS hit } RETURN x;
+ERROR:  the MATCH of a CALL subquery body cannot read a property the body writes
+LINE 1: UNWIND [1,2] AS x CALL () { MATCH (m:WPO) WHERE NOT jsonb_ex...
+                          ^
+DETAIL:  Each execution of the body would observe the previous executions' updates.
+UNWIND [1,2] AS i CALL (*) { MATCH (m) CREATE (c:WXX) RETURN id(c) AS cid } RETURN i;
+ERROR:  a CALL subquery body cannot create into a label its own MATCH reads
+LINE 1: UNWIND [1,2] AS i CALL (*) { MATCH (m) CREATE (c:WXX) RETURN...
+                          ^
+DETAIL:  Each execution of the body would observe the previous executions' creations.
+MATCH (w:WP) CALL (w) { CREATE (c:WSTAR {v: 1}) RETURN * } RETURN w.name;
+ERROR:  RETURN * is not supported in a CALL subquery body that writes
+LINE 1: MATCH (w:WP) CALL (w) { CREATE (c:WSTAR {v: 1}) RETURN * } R...
+                     ^
+UNWIND [1,2] AS i CALL () { MATCH (n:WPO) WHERE NOT EXISTS { SELECT 1 FROM pg_class } CREATE (:WB2) } RETURN i;
+ERROR:  a subquery expression is not supported in a CALL subquery body that writes yet
+LINE 1: UNWIND [1,2] AS i CALL () { MATCH (n:WPO) WHERE NOT EXISTS {...
+                          ^
+MATCH (w:WP) CALL (w) { MATCH (n:WPO) WHERE EXISTS((n)-[:WOWNS]->()) SET n.s = 1 };
+ERROR:  a subquery expression is not supported in a CALL subquery body that writes yet
+LINE 1: MATCH (w:WP) CALL (w) { MATCH (n:WPO) WHERE EXISTS((n)-[:WOW...
+                     ^
+-- 7.9 prepared statements re-analyze cleanly ---------------------------------
+PREPARE wcall AS MATCH (w:WP) CALL (w) { SET w.prep = 1 } RETURN w.name ORDER BY w.name;
+EXECUTE wcall;
+ name  
+-------
+ "ann"
+ "bob"
+(2 rows)
+
+DISCARD PLANS;
+EXECUTE wcall;
+ name  
+-------
+ "ann"
+ "bob"
+(2 rows)
+
+DEALLOCATE wcall;
+-- 7.10 the body's writes stay set-based (no write node re-executes per row) --
+CREATE FUNCTION call_write_loops(q text) RETURNS text AS $fn$
+DECLARE
+    ln text;
+BEGIN
+    BEGIN
+        FOR ln IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) ' || q
+        LOOP
+            IF ln ~ 'Graph (Create|Set|Delete|Merge)' AND ln ~ 'loops=([2-9]|\d\d+)' THEN
+                RAISE EXCEPTION 'PERROW %', ln;
+            END IF;
+        END LOOP;
+        RAISE EXCEPTION 'SETBASED';
+    EXCEPTION
+        WHEN raise_exception THEN
+            IF SQLERRM = 'SETBASED' THEN
+                RETURN 'set-based';
+            ELSIF SQLERRM LIKE 'PERROW %' THEN
+                RETURN 'per-row!';
+            END IF;
+            RAISE;
+    END;
+END;
+$fn$ LANGUAGE plpgsql;
+SELECT call_write_loops('MATCH (w:WP) CALL (w) { SET w.lp = 1 } RETURN w.name') AS u1;
+    u1     
+-----------
+ set-based
+(1 row)
+
+SELECT call_write_loops('MATCH (o:WP2) CALL (o) { MATCH (o)-[e:HASD2]->(d:WD) SET d.lp = 1 } RETURN o.name') AS u2;
+    u2     
+-----------
+ set-based
+(1 row)
+
+SELECT call_write_loops('MATCH (w:WP) CALL (w) { CREATE (l:WLOG3 {of: w.name}) RETURN l.of AS made } RETURN made') AS r;
+     r     
+-----------
+ set-based
+(1 row)
+
+-- the writes the classifier probed above rolled back with the EXPLAIN
+MATCH (w:WP) WHERE w.lp IS NOT NULL RETURN count(*) AS rolled_back;
+ rolled_back 
+-------------
+ 0
+(1 row)
+
+DROP FUNCTION call_write_loops(text);
 -- cleanup
 DROP GRAPH cypher_call CASCADE;
-NOTICE:  drop cascades to 12 other objects
+NOTICE:  drop cascades to 28 other objects
 DETAIL:  drop cascades to sequence cypher_call.ag_label_seq
 drop cascades to vlabel ag_vertex
 drop cascades to elabel ag_edge
@@ -1212,3 +1790,19 @@ drop cascades to elabel has_toy
 drop cascades to vlabel toy
 drop cascades to elabel knows
 drop cascades to vlabel call
+drop cascades to vlabel wp
+drop cascades to vlabel wsolo
+drop cascades to vlabel wlog
+drop cascades to vlabel wnew
+drop cascades to vlabel wfresh
+drop cascades to vlabel wd
+drop cascades to elabel hasd
+drop cascades to vlabel wp2
+drop cascades to vlabel wcopy
+drop cascades to vlabel wlog2
+drop cascades to vlabel wempty
+drop cascades to vlabel wcounter
+drop cascades to vlabel wacc
+drop cascades to vlabel wdg
+drop cascades to elabel wowns
+drop cascades to vlabel wpo

@@ -343,7 +343,10 @@ static Node *transformPropMap(ParseState *pstate, Node *expr,
 							  ParseExprKind exprKind);
 static Node *stripNullKeys(ParseState *pstate, Node *properties);
 static void assign_query_eager(Query *query);
+static List *addLabelReadRelids(List *read_relids, const char *labname,
+								const char *fallback_root, Oid graph_oid);
 static void forceEagerWritesBeforeRead(Query *qry, List *pattern);
+static bool callImportIsStar(List *importlist);
 
 /* transform */
 typedef Query *(*TransformMethod) (ParseState *pstate, Node *parseTree);
@@ -775,6 +778,16 @@ labelCreatedByPrevClause(Node *prev, char *labname, char labkind)
 		pattern = ((CypherCreateClause *) clause->detail)->pattern;
 	else if (cypherClauseTag(clause) == T_CypherMergeClause)
 		pattern = ((CypherMergeClause *) clause->detail)->pattern;
+	else if (cypherClauseTag(clause) == T_CypherCallClause)
+	{
+		/* a CALL body's writes create labels too */
+		CypherCallClause *call = (CypherCallClause *) clause->detail;
+
+		if (IsA(call->subquery, CypherStmt) &&
+			labelCreatedByPrevClause(((CypherStmt *) call->subquery)->last,
+									 labname, labkind))
+			return true;
+	}
 
 	foreach(lp, pattern)
 	{
@@ -1227,7 +1240,17 @@ transformCypherSetClause(ParseState *pstate, CypherClause *clause)
 	pstate->p_hasGraphwriteClause = true;
 	qry->hasGraphwriteClause = pstate->p_hasGraphwriteClause;
 
-	substitute_set_props_as_targetentry(pstate, qry, qry->g_sets);
+	/*
+	 * In an accumulating CALL body the SET evaluates at the ModifyGraph
+	 * level against the per-row accumulated element state (the same way
+	 * MERGE ON SET does), so the target column keeps its plain Var and no
+	 * substitution happens: the executor writes each row's freshly computed
+	 * element into the slot itself.
+	 */
+	if (pstate->p_call_accumulate_sets)
+		qry->g_accumulate = true;
+	else
+		substitute_set_props_as_targetentry(pstate, qry, qry->g_sets);
 
 	assign_query_collations(pstate, qry);
 	foreach(le, qry->g_sets)
@@ -1569,6 +1592,1578 @@ transformCypherForClause(ParseState *pstate, CypherClause *clause)
 }
 
 /*
+ * CypherCallEndsInWrite
+ *		Does this CALL clause's body end in a write clause (a unit write
+ *		subquery)?  Such a CALL may terminate a statement, like an update
+ *		clause; a reading or returning CALL may not.
+ */
+bool
+CypherCallEndsInWrite(CypherCallClause *detail)
+{
+	CypherStmt *stmt;
+
+	if (!IsA(detail->subquery, CypherStmt))
+		return false;			/* a set-operation tree */
+
+	stmt = (CypherStmt *) detail->subquery;
+
+	/* a body ending in a nested unit write CALL ends in a write */
+	if (IsA(stmt->last, CypherClause) &&
+		cypherClauseTag(stmt->last) == T_CypherCallClause)
+		return CypherCallEndsInWrite((CypherCallClause *) ((CypherClause *) stmt->last)->detail);
+
+	return IsGraphWriteClause(stmt->last);
+}
+
+/* ----------------------------------------------------------------
+ * CALL subqueries with write bodies
+ *
+ * A writing body is composed into the enclosing clause pipeline instead of
+ * being joined in as a subquery: each of its clauses becomes an ordinary
+ * chained clause -- so the write machinery (per-clause command-id windows,
+ * eagerness, the pre-drain barrier, the multi-update guard, triggers)
+ * behaves exactly as if the body had been written inline -- with a
+ * CypherCallBoundary at the head that transforms the outer working table
+ * and hides the variables the CALL did not import.
+ *
+ * Only bodies whose set-based execution is provably indistinguishable from
+ * per-row execution (each invocation observing its predecessors' writes)
+ * are admitted; everything else is rejected with a specific error, never
+ * silently different.
+ * ---------------------------------------------------------------- */
+
+/*
+ * callStmtHasWrite
+ *		Does this raw CALL body contain a write clause anywhere -- including
+ *		inside nested CALL bodies and set-operation arms?  (A set-operation
+ *		body is a SelectStmt tree whose arms wrap CypherStmts; see
+ *		makeCypherSetOp.)
+ */
+static bool
+callStmtHasWrite(Node *stmt)
+{
+	CypherClause *clause;
+
+	if (stmt == NULL)
+		return false;
+
+	check_stack_depth();
+
+	if (IsA(stmt, SelectStmt))
+	{
+		SelectStmt *sel = (SelectStmt *) stmt;
+
+		if (sel->op != SETOP_NONE)
+			return callStmtHasWrite((Node *) sel->larg) ||
+				callStmtHasWrite((Node *) sel->rarg);
+
+		if (sel->fromClause != NIL)
+		{
+			ListCell   *lf;
+
+			foreach(lf, sel->fromClause)
+			{
+				Node	   *item = lfirst(lf);
+
+				if (IsA(item, RangeSubselect) &&
+					callStmtHasWrite(((RangeSubselect *) item)->subquery))
+					return true;
+			}
+		}
+		return false;
+	}
+
+	if (!IsA(stmt, CypherStmt))
+		return false;
+
+	clause = (CypherClause *) ((CypherStmt *) stmt)->last;
+	while (clause != NULL)
+	{
+		if (IsGraphWriteClause((Node *) clause))
+			return true;
+		if (cypherClauseTag(clause) == T_CypherCallClause)
+		{
+			CypherCallClause *call = (CypherCallClause *) clause->detail;
+
+			if (callStmtHasWrite(call->subquery))
+				return true;
+		}
+		clause = (CypherClause *) clause->prev;
+	}
+
+	return false;
+}
+
+/*
+ * A conservative set of top-level property names an expression reads or a
+ * write touches; "all" subsumes the list.  Used for the commutation checks
+ * below: set-based execution of a body is per-row-equivalent only when no
+ * read can observe another row's write.
+ */
+typedef struct CallPropSet
+{
+	List	   *names;			/* String nodes */
+	bool		all;
+} CallPropSet;
+
+static bool
+callPropSetIsEmpty(CallPropSet *ps)
+{
+	return !ps->all && ps->names == NIL;
+}
+
+static bool
+callPropSetsIntersect(CallPropSet *a, CallPropSet *b)
+{
+	ListCell   *la;
+
+	if (callPropSetIsEmpty(a) || callPropSetIsEmpty(b))
+		return false;
+	if (a->all || b->all)
+		return true;
+
+	foreach(la, a->names)
+	{
+		ListCell   *lb;
+
+		foreach(lb, b->names)
+		{
+			if (strcmp(strVal(lfirst(la)), strVal(lfirst(lb))) == 0)
+				return true;
+		}
+	}
+	return false;
+}
+
+/*
+ * collectReadPropsWalker
+ *		Collect the top-level property names a raw expression reads.  "n.p"
+ *		is a ColumnRef whose second field names the property; any indirection
+ *		or star access reads arbitrary properties.
+ */
+static bool
+collectReadPropsWalker(Node *node, CallPropSet *props)
+{
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, ColumnRef))
+	{
+		ColumnRef  *cr = (ColumnRef *) node;
+
+		if (list_length(cr->fields) > 1)
+		{
+			Node	   *fld = lsecond(cr->fields);
+
+			if (IsA(fld, String))
+				props->names = lappend(props->names, fld);
+			else
+				props->all = true;
+		}
+		else
+		{
+			/*
+			 * A bare element reference: the surrounding expression (a
+			 * function like properties(), a cast, a comparison of whole
+			 * elements) can read any of its properties.
+			 */
+			props->all = true;
+		}
+		return false;
+	}
+	if (IsA(node, A_Indirection))
+	{
+		props->all = true;
+		return false;
+	}
+
+	return raw_expression_tree_walker(node, collectReadPropsWalker, props);
+}
+
+/*
+ * cypherExprIsRowVarying
+ *		Can this raw expression evaluate differently from row to row?  Any
+ *		variable reference qualifies.  A SET whose value is row-varying must
+ *		be applied in row order (last row wins, as in per-row execution),
+ *		which the accumulating evaluator provides; a constant value makes the
+ *		order unobservable.
+ */
+static bool
+cypherExprIsRowVarying(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, ColumnRef))
+		return true;
+	if (IsA(node, A_Indirection))
+		return true;
+
+	return raw_expression_tree_walker(node, cypherExprIsRowVarying, context);
+}
+
+/*
+ * collectSetWrittenProps
+ *		The top-level property names the items of a SET/REMOVE (or MERGE ON
+ *		SET) write.  "SET n = map", "SET n += map" and computed paths write
+ *		arbitrary properties.
+ */
+static void
+collectSetWrittenProps(List *items, CallPropSet *props)
+{
+	ListCell   *li;
+
+	foreach(li, items)
+	{
+		CypherSetProp *sp = lfirst(li);
+
+		if (sp->add)			/* += */
+		{
+			props->all = true;
+			continue;
+		}
+		if (IsA(sp->prop, ColumnRef))
+		{
+			ColumnRef  *cr = (ColumnRef *) sp->prop;
+
+			if (list_length(cr->fields) > 1 &&
+				IsA(lsecond(cr->fields), String))
+			{
+				props->names = lappend(props->names, lsecond(cr->fields));
+				continue;
+			}
+		}
+		props->all = true;		/* whole-map SET or computed path */
+	}
+}
+
+/*
+ * callImportListContains
+ */
+static bool
+callImportListContains(List *importlist, const char *varname)
+{
+	ListCell   *li;
+
+	if (varname == NULL)
+		return false;
+
+	/*
+	 * Under CALL (*) the imported names are not known until the outer chain
+	 * is transformed, so no variable can be assumed bound here; treating a
+	 * fresh variable as bound would hide its label scan from the
+	 * commutation checks.
+	 */
+	if (callImportIsStar(importlist))
+		return false;
+
+	foreach(li, importlist)
+	{
+		if (strcmp(strVal(lfirst(li)), varname) == 0)
+			return true;
+	}
+	return false;
+}
+
+/*
+ * callPatternLabelRelids
+ *		The label relations a MATCH pattern scans, inheritance-closed.  An
+ *		unlabeled element whose variable is already bound (imported) is a
+ *		join against the existing binding, not a scan, and reads nothing.
+ */
+static List *
+callPatternLabelRelids(List *pattern, List *importlist, Oid graph_oid)
+{
+	List	   *relids = NIL;
+	ListCell   *lp;
+
+	foreach(lp, pattern)
+	{
+		CypherPath *cpath = lfirst(lp);
+		ListCell   *le;
+
+		foreach(le, cpath->chain)
+		{
+			Node	   *elem = lfirst(le);
+
+			if (IsA(elem, CypherNode))
+			{
+				CypherNode *cnode = (CypherNode *) elem;
+				char	   *labname = getCypherName(cnode->label);
+
+				if (labname == NULL &&
+					callImportListContains(importlist,
+										   getCypherName(cnode->variable)))
+					continue;
+
+				relids = addLabelReadRelids(relids,
+											labname != NULL ? labname : AG_VERTEX,
+											AG_VERTEX, graph_oid);
+			}
+			else
+			{
+				CypherRel  *crel = (CypherRel *) elem;
+
+				if (crel->types == NIL)
+				{
+					if (callImportListContains(importlist,
+											   getCypherName(crel->variable)))
+						continue;
+					relids = addLabelReadRelids(relids, AG_EDGE, AG_EDGE,
+												graph_oid);
+				}
+				else
+				{
+					ListCell   *lt;
+
+					foreach(lt, crel->types)
+						relids = addLabelReadRelids(relids,
+													getCypherName(lfirst(lt)),
+													AG_EDGE, graph_oid);
+				}
+			}
+		}
+	}
+
+	return relids;
+}
+
+/*
+ * callPatternCreateRelids
+ *		The label relations a CREATE/MERGE pattern creates into -- exact, not
+ *		inheritance-closed: creation puts elements in the named label only.
+ *		A label that does not exist yet will be auto-created under its
+ *		kind's root; use the root's relid as its marker, which intersects a
+ *		read closure exactly when the read includes the root itself (an
+ *		unlabeled or root-labeled pattern element).
+ */
+static List *
+callPatternCreateRelids(List *pattern, Oid graph_oid)
+{
+	List	   *relids = NIL;
+	ListCell   *lp;
+
+	foreach(lp, pattern)
+	{
+		CypherPath *cpath = lfirst(lp);
+		ListCell   *le;
+
+		foreach(le, cpath->chain)
+		{
+			Node	   *elem = lfirst(le);
+			const char *labname;
+			const char *rootname;
+			Oid			laboid;
+			Oid			relid;
+
+			if (IsA(elem, CypherNode))
+			{
+				labname = getCypherName(((CypherNode *) elem)->label);
+				rootname = AG_VERTEX;
+			}
+			else
+			{
+				CypherRel  *crel = (CypherRel *) elem;
+
+				labname = (crel->types != NIL) ?
+					getCypherName(linitial(crel->types)) : NULL;
+				rootname = AG_EDGE;
+			}
+			if (labname == NULL)
+				labname = rootname;
+
+			laboid = get_labname_laboid(labname, graph_oid);
+			if (!OidIsValid(laboid))
+				laboid = get_labname_laboid(rootname, graph_oid);
+			if (!OidIsValid(laboid))
+				continue;
+			relid = get_laboid_relid(laboid);
+			if (OidIsValid(relid))
+				relids = lappend_oid(relids, relid);
+		}
+	}
+
+	return relids;
+}
+
+static bool
+callOidListsIntersect(List *a, List *b)
+{
+	ListCell   *lc;
+
+	foreach(lc, a)
+	{
+		if (list_member_oid(b, lfirst_oid(lc)))
+			return true;
+	}
+	return false;
+}
+
+/*
+ * callBodyCheckExprWalker / callBodyCheckExpr
+ *		A raw expression of a writing CALL body may not contain a subquery:
+ *		what it reads is invisible to the commutation checks (and the
+ *		Cypher-pattern subquery forms cannot even be walked generically).
+ */
+static bool
+callBodyCheckExprWalker(Node *node, ParseState *pstate)
+{
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, SubLink))
+		return true;			/* found one; do not descend into it */
+
+	return raw_expression_tree_walker(node, callBodyCheckExprWalker, pstate);
+}
+
+static void
+callBodyCheckExpr(ParseState *pstate, Node *expr, int location)
+{
+	if (callBodyCheckExprWalker(expr, pstate))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("a subquery expression is not supported in a CALL subquery body that writes yet"),
+				 parser_errposition(pstate, location)));
+}
+
+/*
+ * collectPropMapReads
+ *		A pattern's property-map constraint reads its keys (they filter the
+ *		match) and whatever its value expressions read.  A parameter or
+ *		computed map has unknown keys.
+ */
+static void
+collectPropMapReads(Node *prop_map, CallPropSet *props)
+{
+	ListCell   *lk;
+	int			i = 0;
+
+	if (prop_map == NULL)
+		return;
+
+	if (!IsA(prop_map, CypherMapExpr))
+	{
+		props->all = true;
+		return;
+	}
+
+	foreach(lk, ((CypherMapExpr *) prop_map)->keyvals)
+	{
+		Node	   *n = lfirst(lk);
+
+		if (i++ % 2 == 0)		/* key */
+		{
+			if (IsA(n, String))
+				props->names = lappend(props->names, n);
+			else
+				props->all = true;
+		}
+		else					/* value expression */
+			(void) collectReadPropsWalker(n, props);
+	}
+}
+
+/*
+ * collectMatchReadProps
+ *		The property names a MATCH reads: its WHERE and the property
+ *		constraints of its pattern.
+ */
+static void
+collectMatchReadProps(CypherMatchClause *match, CallPropSet *props)
+{
+	ListCell   *lp;
+
+	(void) collectReadPropsWalker(match->where, props);
+
+	foreach(lp, match->pattern)
+	{
+		CypherPath *cpath = lfirst(lp);
+		ListCell   *le;
+
+		foreach(le, cpath->chain)
+		{
+			Node	   *elem = lfirst(le);
+			Node	   *prop_map;
+
+			if (IsA(elem, CypherNode))
+				prop_map = ((CypherNode *) elem)->prop_map;
+			else
+				prop_map = ((CypherRel *) elem)->prop_map;
+
+			collectPropMapReads(prop_map, props);
+		}
+	}
+}
+
+/* the derived shape of a writing CALL body */
+typedef enum CallBodyKind
+{
+	CALL_BODY_UNIT,				/* chain ends in a write clause */
+	CALL_BODY_RETURNING			/* chain ends in RETURN, writes inside */
+} CallBodyKind;
+
+typedef struct CallBodyShape
+{
+	CallBodyKind kind;
+	CypherClause *lead_match;	/* the single leading MATCH, or NULL */
+	CypherClause *return_clause;	/* the terminal RETURN (RETURNING only) */
+	int			nwrites;
+	bool		accumulate;		/* a SET reads properties: evaluate the body's
+								 * SETs against per-row accumulated state */
+} CallBodyShape;
+
+/*
+ * callBodyClassify
+ *		Validate a writing CALL body and derive its shape.  Everything
+ *		admitted here executes set-based with results identical to Neo4j\'s
+ *		per-row execution; every other body is rejected with a specific
+ *		error.
+ */
+static void
+callBodyClassify(ParseState *pstate, CypherCallClause *detail,
+				 CallBodyShape *shape)
+{
+	Node	   *stmt = detail->subquery;
+	CypherClause *clause;
+	List	   *chain = NIL;
+	ListCell   *lc;
+	int			loc = detail->location;
+	Oid			graph_oid = get_graph_path_oid();
+	bool		seen_write = false;
+	bool		have_sole_write = false;	/* MERGE or DELETE seen */
+	List	   *match_relids = NIL;
+	CallPropSet match_reads = {NIL, false};
+	CallPropSet set_writes = {NIL, false};
+	CallPropSet create_reads = {NIL, false};
+
+	memset(shape, 0, sizeof(*shape));
+
+	if (!IsA(stmt, CypherStmt))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("UNION between CALL subquery bodies that write is not supported"),
+				 parser_errposition(pstate, loc)));
+
+	clause = (CypherClause *) ((CypherStmt *) stmt)->last;
+	while (clause != NULL)
+	{
+		chain = lcons(clause, chain);
+		clause = (CypherClause *) clause->prev;
+	}
+
+	{
+		CypherClause *last = llast(chain);
+
+		if (cypherClauseTag(last) == T_CypherProjection &&
+			cypherProjectionKind(last->detail) == CP_RETURN)
+		{
+			shape->kind = CALL_BODY_RETURNING;
+			shape->return_clause = last;
+			chain = list_delete_last(chain);
+		}
+		else
+			shape->kind = CALL_BODY_UNIT;
+	}
+
+	foreach(lc, chain)
+	{
+		CypherClause *c = lfirst(lc);
+
+		switch (cypherClauseTag(c))
+		{
+			case T_CypherMatchClause:
+				{
+					CypherMatchClause *m = (CypherMatchClause *) c->detail;
+					ListCell   *lpx;
+
+					callBodyCheckExpr(pstate, m->where, loc);
+					foreach(lpx, m->pattern)
+					{
+						CypherPath *cpx = lfirst(lpx);
+						ListCell   *lex;
+
+						foreach(lex, cpx->chain)
+						{
+							Node	   *elemx = lfirst(lex);
+
+							callBodyCheckExpr(pstate,
+											  IsA(elemx, CypherNode) ?
+											  ((CypherNode *) elemx)->prop_map :
+											  ((CypherRel *) elemx)->prop_map,
+											  loc);
+						}
+					}
+
+					if (seen_write)
+						ereport(ERROR,
+								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								 errmsg("a read after a write is not supported in a CALL subquery body"),
+								 errhint("Put the MATCH before the writes, or after the CALL."),
+								 parser_errposition(pstate, loc)));
+					if (shape->lead_match != NULL)
+						ereport(ERROR,
+								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								 errmsg("only one MATCH is supported in a CALL subquery body that writes"),
+								 parser_errposition(pstate, loc)));
+					if (m->optional)
+						ereport(ERROR,
+								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								 errmsg("OPTIONAL MATCH is not supported in a CALL subquery body that writes"),
+								 parser_errposition(pstate, loc)));
+
+					shape->lead_match = c;
+					collectMatchReadProps(m, &match_reads);
+				}
+				break;
+
+			case T_CypherCreateClause:
+			case T_CypherMergeClause:
+				{
+					List	   *pattern;
+					ListCell   *lp;
+
+					if (cypherClauseTag(c) == T_CypherCreateClause)
+						pattern = ((CypherCreateClause *) c->detail)->pattern;
+					else
+					{
+						CypherMergeClause *mg = (CypherMergeClause *) c->detail;
+						ListCell   *ls;
+
+						pattern = mg->pattern;
+						have_sole_write = true;
+
+						/*
+						 * ON MATCH / ON CREATE SET evaluate per merged row
+						 * against the accumulated element (the MERGE
+						 * machinery already observes its own clause\'s
+						 * earlier rows), so their values may read
+						 * properties; but what they write still must not be
+						 * read by the body\'s MATCH.
+						 */
+						foreach(ls, mg->sets)
+						{
+							CypherSetClause *on_set = lfirst(ls);
+							ListCell   *lsx;
+
+							foreach(lsx, on_set->items)
+							{
+								CypherSetProp *spx = lfirst(lsx);
+
+								callBodyCheckExpr(pstate, spx->expr, loc);
+							}
+							collectSetWrittenProps(on_set->items, &set_writes);
+						}
+					}
+
+					/*
+					 * Creating into a label the body\'s MATCH reads would let
+					 * one row\'s creation change what a later row matches;
+					 * set-based execution cannot reproduce that.
+					 */
+					if (shape->lead_match != NULL)
+					{
+						if (match_relids == NIL)
+							match_relids = callPatternLabelRelids(
+																  ((CypherMatchClause *) shape->lead_match->detail)->pattern,
+																  detail->importlist,
+																  graph_oid);
+						if (callOidListsIntersect(match_relids,
+												  callPatternCreateRelids(pattern,
+																		  graph_oid)))
+							ereport(ERROR,
+									(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+									 errmsg("a CALL subquery body cannot create into a label its own MATCH reads"),
+									 errdetail("Each execution of the body would observe the previous executions\' creations."),
+									 parser_errposition(pstate, loc)));
+					}
+
+					/* property reads in the created elements\' maps */
+					foreach(lp, pattern)
+					{
+						CypherPath *cpath = lfirst(lp);
+						ListCell   *le;
+
+						foreach(le, cpath->chain)
+						{
+							Node	   *elem = lfirst(le);
+							Node	   *prop_map;
+
+							if (IsA(elem, CypherNode))
+								prop_map = ((CypherNode *) elem)->prop_map;
+							else
+								prop_map = ((CypherRel *) elem)->prop_map;
+							callBodyCheckExpr(pstate, prop_map, loc);
+							(void) collectReadPropsWalker(prop_map,
+														  &create_reads);
+						}
+					}
+
+					seen_write = true;
+					shape->nwrites++;
+				}
+				break;
+
+			case T_CypherSetClause:
+				{
+					CypherSetClause *sc = (CypherSetClause *) c->detail;
+					ListCell   *li;
+
+					/*
+					 * A value that reads properties must observe the
+					 * previous rows\' updates (Neo4j: each execution of the
+					 * body observes its predecessors); route the body\'s
+					 * SETs through the accumulating evaluator.
+					 */
+					foreach(li, sc->items)
+					{
+						CypherSetProp *sp = lfirst(li);
+
+						callBodyCheckExpr(pstate, sp->expr, loc);
+						callBodyCheckExpr(pstate, sp->prop, loc);
+					}
+					if (!sc->is_remove)
+					{
+						foreach(li, sc->items)
+						{
+							CypherSetProp *sp = lfirst(li);
+
+							if (sp->add || cypherExprIsRowVarying(sp->expr, NULL))
+							{
+								shape->accumulate = true;
+								break;
+							}
+						}
+					}
+					collectSetWrittenProps(sc->items, &set_writes);
+					seen_write = true;
+					shape->nwrites++;
+				}
+				break;
+
+			case T_CypherDeleteClause:
+				if (shape->kind == CALL_BODY_RETURNING)
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("DELETE is not supported in a CALL subquery body that returns rows yet"),
+							 parser_errposition(pstate, loc)));
+				have_sole_write = true;
+				seen_write = true;
+				shape->nwrites++;
+				break;
+
+			case T_CypherProjection:
+				if (cypherProjectionKind(c->detail) == CP_FINISH)
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("FINISH is not supported in a CALL subquery body"),
+							 errhint("A body ending in a write clause already returns nothing."),
+							 parser_errposition(pstate, loc)));
+				if (cypherProjectionKind(c->detail) == CP_RETURN)
+					ereport(ERROR,
+							(errcode(ERRCODE_SYNTAX_ERROR),
+							 errmsg("RETURN must be at the end of the CALL subquery"),
+							 parser_errposition(pstate, loc)));
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("WITH is not supported in a CALL subquery body that writes yet"),
+						 parser_errposition(pstate, loc)));
+				break;
+
+			case T_CypherCallClause:
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("a CALL subquery is not supported inside a CALL subquery body that writes yet"),
+						 parser_errposition(pstate, loc)));
+				break;
+
+			case T_CypherUnwindClause:
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("UNWIND is not supported in a CALL subquery body that writes yet"),
+						 parser_errposition(pstate, loc)));
+				break;
+
+			case T_CypherForClause:
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("FOR is not supported in a CALL subquery body that writes yet"),
+						 parser_errposition(pstate, loc)));
+				break;
+
+			case T_CypherLoadClause:
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("LOAD is not supported in a CALL subquery body that writes"),
+						 parser_errposition(pstate, loc)));
+				break;
+
+			case T_CypherModifier:
+			case T_CypherFilterClause:
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("ORDER BY, SKIP, LIMIT and FILTER are not supported in a CALL subquery body that writes yet"),
+						 parser_errposition(pstate, loc)));
+				break;
+
+			default:
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("unsupported clause in a CALL subquery body that writes"),
+						 parser_errposition(pstate, loc)));
+		}
+	}
+
+	if (shape->nwrites == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_SYNTAX_ERROR),
+				 errmsg("a CALL subquery body must contain a write clause or end with RETURN"),
+				 parser_errposition(pstate, loc)));
+
+	if (have_sole_write && shape->nwrites > 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("MERGE and DELETE must be the only write clause in a CALL subquery body"),
+				 parser_errposition(pstate, loc)));
+
+	/*
+	 * Cross-row commutation checks: a property some write updates must not
+	 * be read by the body\'s MATCH or by a created element\'s property map --
+	 * per-row execution would observe the previous rows\' updates there.
+	 */
+	if (callPropSetsIntersect(&set_writes, &match_reads))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("the MATCH of a CALL subquery body cannot read a property the body writes"),
+				 errdetail("Each execution of the body would observe the previous executions\' updates."),
+				 parser_errposition(pstate, loc)));
+	if (callPropSetsIntersect(&set_writes, &create_reads))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("a CALL subquery body cannot create from a property the body writes"),
+				 errdetail("Each execution of the body would observe the previous executions\' updates."),
+				 parser_errposition(pstate, loc)));
+
+	if (shape->kind == CALL_BODY_RETURNING)
+	{
+		CypherProjection *proj =
+			(CypherProjection *) shape->return_clause->detail;
+		ListCell   *li;
+
+		if (proj->distinct != NIL || proj->order != NIL ||
+			proj->skip != NULL || proj->limit != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("DISTINCT, ORDER BY, SKIP and LIMIT are not supported in the RETURN of a CALL subquery body that writes yet"),
+					 parser_errposition(pstate, loc)));
+
+		foreach(li, proj->items)
+		{
+			ResTarget  *rt = lfirst(li);
+
+			if (IsA(rt->val, ColumnRef) &&
+				list_length(((ColumnRef *) rt->val)->fields) == 1 &&
+				IsA(linitial(((ColumnRef *) rt->val)->fields), A_Star))
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("RETURN * is not supported in a CALL subquery body that writes"),
+						 parser_errposition(pstate, loc)));
+			callBodyCheckExpr(pstate, rt->val, loc);
+		}
+	}
+}
+
+/*
+ * callLeadMatchGateVar
+ *		The name of a variable the lead MATCH binds beyond the imported ones.
+ *		On a row with no match the LEFT-joined pattern leaves it NULL, which
+ *		is what gates the body's writes for that row.
+ */
+static char *
+callLeadMatchGateVar(CypherMatchClause *match, List *importlist)
+{
+	bool		import_all = callImportIsStar(importlist);
+	ListCell   *lp;
+
+	foreach(lp, match->pattern)
+	{
+		CypherPath *cpath = lfirst(lp);
+		ListCell   *le;
+
+		foreach(le, cpath->chain)
+		{
+			Node	   *elem = lfirst(le);
+			char	   *varname;
+			bool		imported = false;
+
+			if (IsA(elem, CypherNode))
+				varname = getCypherName(((CypherNode *) elem)->variable);
+			else
+				varname = getCypherName(((CypherRel *) elem)->variable);
+
+			if (varname == NULL)
+				continue;
+
+			if (import_all)
+				imported = true;
+			else
+			{
+				ListCell   *li;
+
+				foreach(li, importlist)
+				{
+					if (strcmp(strVal(lfirst(li)), varname) == 0)
+					{
+						imported = true;
+						break;
+					}
+				}
+			}
+			if (!imported)
+				return varname;
+		}
+	}
+
+	return NULL;
+}
+
+/*
+ * callStampAccumOwnValues
+ *		Mark every accumulating SET of the composed body chain as surfacing
+ *		each row's own value (a returning body), stopping at the boundary
+ *		wrapper.
+ */
+static void
+callStampAccumOwnValues(Query *qry, Query *wrapper)
+{
+	ListCell   *lc;
+
+	check_stack_depth();
+
+	if (qry == wrapper)
+		return;
+
+	if (qry->commandType == CMD_GRAPHWRITE && qry->g_accumulate)
+		qry->g_accumOwnValues = true;
+
+	foreach(lc, qry->rtable)
+	{
+		RangeTblEntry *rte = lfirst(lc);
+
+		if (rte->rtekind == RTE_SUBQUERY && rte->subquery != NULL)
+			callStampAccumOwnValues(rte->subquery, wrapper);
+	}
+}
+
+/*
+ * callStampWriteGate
+ *		Set the write gate on every write Query of the composed body chain
+ *		(including the synthetic ones DETACH DELETE and multi-path CREATE
+ *		produce), stopping at the boundary wrapper.
+ */
+static void
+callStampWriteGate(Query *qry, Query *wrapper, AttrNumber gate_attno)
+{
+	ListCell   *lc;
+
+	check_stack_depth();
+
+	if (qry == wrapper)
+		return;
+
+	if (qry->commandType == CMD_GRAPHWRITE)
+		qry->g_writeGateAttno = gate_attno;
+
+	foreach(lc, qry->rtable)
+	{
+		RangeTblEntry *rte = lfirst(lc);
+
+		if (rte->rtekind == RTE_SUBQUERY && rte->subquery != NULL)
+			callStampWriteGate(rte->subquery, wrapper, gate_attno);
+	}
+}
+
+/*
+ * transformCallBodyWriteClause
+ *		Transform a write clause at this ParseState level (the terminal
+ *		shape: the body\'s last write is the statement\'s last clause).
+ */
+static Query *
+transformCallBodyWriteClause(ParseState *pstate, CypherClause *clause)
+{
+	switch (cypherClauseTag(clause))
+	{
+		case T_CypherCreateClause:
+			return transformCypherCreateClause(pstate, clause);
+		case T_CypherDeleteClause:
+			return transformCypherDeleteClause(pstate, clause);
+		case T_CypherSetClause:
+			return transformCypherSetClause(pstate, clause);
+		case T_CypherMergeClause:
+			return transformCypherMergeClause(pstate, clause);
+		default:
+			elog(ERROR, "unexpected terminal clause in a CALL subquery body");
+			return NULL;		/* keep compiler quiet */
+	}
+}
+
+/*
+ * transformCypherCallWriteBody
+ *		The write path of transformCypherCallClause: classify the body,
+ *		compose it into the pipeline behind a CypherCallBoundary, and
+ *		surface the outer columns unchanged.
+ */
+static Query *
+transformCypherCallWriteBody(ParseState *pstate, CypherClause *clause)
+{
+	CypherCallClause *detail = (CypherCallClause *) clause->detail;
+	CallBodyShape shape;
+	CypherStmt *bodyCopy;
+	CypherCallBoundary *boundary;
+	CypherClause *bclause;
+	CypherClause *head;
+	bool		terminal = (pstate->parentParseState == NULL);
+	ParseState *ps;
+	Query	   *qry;
+
+	/*
+	 * A writing CALL is only allowed as a clause of the Cypher pipeline:
+	 * inside an expression subquery (EXISTS, COUNT, ...) or a common table
+	 * expression its plan could be read partially, repeatedly, or not at
+	 * all.  The clause pipeline itself analyzes previous clauses under
+	 * EXPR_KIND_FROM_SUBSELECT, which is therefore the only kind an
+	 * ancestor may carry.  (Cypher queries in a SQL FROM clause are handled
+	 * in transformRangeSubselect.)
+	 */
+	for (ps = pstate; ps != NULL; ps = ps->parentParseState)
+	{
+		if ((ps->p_expr_kind != EXPR_KIND_NONE &&
+			 ps->p_expr_kind != EXPR_KIND_FROM_SUBSELECT) ||
+			ps->p_parent_cte != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("a CALL subquery that writes is only allowed as a clause of a Cypher query"),
+					 parser_errposition(pstate, detail->location)));
+	}
+
+	if (clause->prev == NULL && detail->importlist != NIL)
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_COLUMN),
+				 errmsg("CALL has no preceding clause to import variables from"),
+				 parser_errposition(pstate, detail->location)));
+
+	callBodyClassify(pstate, detail, &shape);
+
+	/* transformCypherStmt only admits a unit write body as a terminator */
+	Assert(!terminal || shape.kind == CALL_BODY_UNIT);
+
+	/*
+	 * Compose the chain: boundary <- copied body clauses.  The body is
+	 * copied so the raw statement stays pristine for re-analysis.  The
+	 * boundary keeps the ORIGINAL raw outer chain as its prev: its transform
+	 * consumes it, and label-validation walks (labelCreatedByPrevClause)
+	 * traverse the CALL the same way they traverse inline clauses.
+	 */
+	bodyCopy = copyObject((CypherStmt *) detail->subquery);
+
+	boundary = makeNode(CypherCallBoundary);
+	boundary->importlist = detail->importlist;
+	boundary->location = detail->location;
+
+	bclause = makeNode(CypherClause);
+	bclause->detail = (Node *) boundary;
+	bclause->prev = clause->prev;
+
+	head = (CypherClause *) bodyCopy->last;
+	while (head->prev != NULL)
+		head = (CypherClause *) head->prev;
+	head->prev = (Node *) bclause;
+
+	if (shape.accumulate)
+		pstate->p_call_accumulate_sets = true;
+
+	if (terminal)
+	{
+		/*
+		 * Terminal unit CALL: transform the chain at this statement-level
+		 * ParseState, so the body\'s last write is the statement\'s last
+		 * clause -- g_last, eagerness, and the no-rows result behave exactly
+		 * as for the inlined terminal write.
+		 */
+		qry = transformCallBodyWriteClause(pstate,
+										   (CypherClause *) bodyCopy->last);
+		pstate->p_call_accumulate_sets = false;
+		return qry;
+	}
+
+	qry = makeNode(Query);
+	qry->commandType = CMD_SELECT;
+
+	if (shape.kind == CALL_BODY_UNIT)
+	{
+		/*
+		 * Mid-pipeline unit CALL: the chain becomes this Query\'s sole
+		 * source, and the projection surfaces exactly the outer columns,
+		 * restoring the names the boundary hid; the body\'s own columns end
+		 * here.
+		 *
+		 * A body whose reads can multiply or drop rows (a leading MATCH)
+		 * gets the unit-cardinality machinery: the boundary numbers the
+		 * input rows, the MATCH is made optional (a row with no match must
+		 * still come out), the writes are gated on a pattern variable that
+		 * is NULL on such rows, and the projection collapses back to exactly
+		 * one output row per input row (DISTINCT ON the row number).
+		 */
+		ParseNamespaceItem *nsitem;
+		List	   *tlist;
+		ListCell   *ln;
+		ListCell   *lt;
+		char	   *gate_var = NULL;
+		int			ncols;
+
+		if (shape.lead_match != NULL)
+		{
+			CypherMatchClause *m;
+
+			gate_var = callLeadMatchGateVar((CypherMatchClause *) shape.lead_match->detail,
+											detail->importlist);
+			if (gate_var == NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("the MATCH of a CALL subquery body must bind at least one named new variable"),
+						 errhint("Name a node or relationship of the pattern; it indicates for each row whether the pattern matched."),
+						 parser_errposition(pstate, detail->location)));
+
+			boundary->add_rowid = true;
+
+			/* the copied chain's head is the lead MATCH */
+			Assert(cypherClauseTag(head) == T_CypherMatchClause);
+			m = (CypherMatchClause *) head->detail;
+			m->optional = true;
+		}
+
+		nsitem = transformClause(pstate, (Node *) bodyCopy->last);
+		pstate->p_call_accumulate_sets = false;
+
+		if (boundary->wrapper == NULL)
+			elog(ERROR, "CALL boundary was not transformed");
+		ncols = list_length(boundary->outer_names);
+
+		tlist = makeTargetListFromNSItem(pstate, nsitem);
+
+		if (shape.lead_match != NULL)
+		{
+			AttrNumber	gate_attno = InvalidAttrNumber;
+			AttrNumber	rowid_attno = (AttrNumber) (ncols + 1);
+			TargetEntry *rowid_te;
+			SortGroupClause *sgc;
+			Oid			lt_opr;
+			Oid			eq_opr;
+			bool		hashable;
+			int			pos;
+
+			/* locate the gate variable's column in the chain output */
+			pos = 1;
+			foreach(lt, tlist)
+			{
+				TargetEntry *te = lfirst(lt);
+
+				if (te->resname != NULL &&
+					strcmp(te->resname, gate_var) == 0)
+				{
+					gate_attno = (AttrNumber) pos;
+					break;
+				}
+				pos++;
+			}
+			if (gate_attno == InvalidAttrNumber)
+				elog(ERROR, "could not find the CALL write-gate column \"%s\"",
+					 gate_var);
+
+			callStampWriteGate(nsitem->p_rte->subquery, boundary->wrapper,
+							   gate_attno);
+
+			/* rowid: resjunk sort/distinct key, kept last */
+			rowid_te = list_nth(tlist, rowid_attno - 1);
+			Assert(exprType((Node *) rowid_te->expr) == INT8OID);
+
+			tlist = list_truncate(tlist, ncols);
+
+			rowid_te->resjunk = true;
+			rowid_te->resno = (AttrNumber) (ncols + 1);
+			rowid_te->ressortgroupref = 1;
+
+			get_sort_group_operators(INT8OID, true, true, false,
+									 &lt_opr, &eq_opr, NULL, &hashable);
+			sgc = makeNode(SortGroupClause);
+			sgc->tleSortGroupRef = 1;
+			sgc->eqop = eq_opr;
+			sgc->sortop = lt_opr;
+			sgc->nulls_first = false;
+			sgc->hashable = hashable;
+
+			qry->distinctClause = list_make1(sgc);
+			qry->sortClause = list_make1(sgc);
+			qry->hasDistinctOn = true;
+
+			forboth(ln, boundary->outer_names, lt, tlist)
+			{
+				TargetEntry *te = lfirst(lt);
+
+				te->resname = pstrdup(strVal(lfirst(ln)));
+			}
+			tlist = lappend(tlist, rowid_te);
+		}
+		else
+		{
+			tlist = list_truncate(tlist, ncols);
+			forboth(ln, boundary->outer_names, lt, tlist)
+			{
+				TargetEntry *te = lfirst(lt);
+
+				te->resname = pstrdup(strVal(lfirst(ln)));
+			}
+		}
+		qry->targetList = tlist;
+	}
+	else
+	{
+		/*
+		 * Returning CALL: the chain ends in the body\'s RETURN, whose Query
+		 * projects only the returned items -- the outer columns would stop
+		 * there.  Transform it by hand (the same steps transformClauseImpl
+		 * performs) so the outer columns can be appended to its target list
+		 * BEFORE the range-table entry freezes the column list, then surface
+		 * the outer columns first (original names restored) and the returned
+		 * items after them.  Cardinality is the chain\'s own: input rows x
+		 * returned rows.
+		 */
+		ParseState *childParseState;
+		Query	   *retqry;
+		Query	   *chainq;
+		ParseNamespaceItem *nsitem;
+		List	   *future_vertices;
+		int			ncols;
+		int			nitems;
+		AttrNumber	attno;
+		ListCell   *ln;
+		ListCell   *lt;
+
+		Assert(pstate->p_expr_kind == EXPR_KIND_NONE);
+		pstate->p_expr_kind = EXPR_KIND_FROM_SUBSELECT;
+
+		childParseState = make_parsestate(pstate);
+		childParseState->p_is_match_quals = pstate->p_is_match_quals;
+		childParseState->p_is_fp_processed = pstate->p_is_fp_processed;
+		childParseState->p_is_optional_match = pstate->p_is_optional_match;
+		childParseState->p_valid_labels = pstate->p_valid_labels;
+		childParseState->p_call_accumulate_sets = pstate->p_call_accumulate_sets;
+
+		retqry = transformStmt(childParseState, (Node *) bodyCopy->last);
+		pstate->p_call_accumulate_sets = false;
+
+		pstate->p_elem_quals = childParseState->p_elem_quals;
+		future_vertices = childParseState->p_future_vertices;
+		if (childParseState->p_nr_modify_clause > 0)
+			pstate->p_nr_modify_clause = childParseState->p_nr_modify_clause;
+		pstate->p_delete_edges_resname = childParseState->p_delete_edges_resname;
+		pstate->p_hasGraphwriteClause = childParseState->p_hasGraphwriteClause;
+		pstate->p_valid_labels = childParseState->p_valid_labels;
+
+		mark_nodes_as_nonlocal(childParseState->p_entity_info_list);
+		pstate->p_entity_info_list = list_concat(pstate->p_entity_info_list,
+												 childParseState->p_entity_info_list);
+
+		free_parsestate(childParseState);
+
+		pstate->p_expr_kind = EXPR_KIND_NONE;
+
+		if (!IsA(retqry, Query) || retqry->commandType != CMD_SELECT)
+			elog(ERROR, "unexpected command in CALL subquery body");
+
+		if (retqry->hasAggs)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("aggregates are not supported in the RETURN of a CALL subquery body that writes yet"),
+					 parser_errposition(pstate, detail->location)));
+
+		if (boundary->wrapper == NULL)
+			elog(ERROR, "CALL boundary was not transformed");
+
+		/* a returning body surfaces each row's own accumulated values */
+		if (shape.accumulate)
+			callStampAccumOwnValues(retqry, boundary->wrapper);
+
+		ncols = list_length(boundary->outer_names);
+		nitems = list_length(retqry->targetList);
+
+		/*
+		 * Append the outer passthrough: the chain (the RETURN Query\'s sole
+		 * source) carries the outer columns at positions 1..ncols.
+		 */
+		chainq = rt_fetch(1, retqry->rtable)->subquery;
+		for (attno = 1; attno <= ncols; attno++)
+		{
+			TargetEntry *src = get_tle_by_resno(chainq->targetList, attno);
+			Var		   *var;
+			TargetEntry *te;
+
+			var = makeVar(1, attno,
+						  exprType((Node *) src->expr),
+						  exprTypmod((Node *) src->expr),
+						  exprCollation((Node *) src->expr),
+						  0);
+			te = makeTargetEntry((Expr *) var,
+								 (AttrNumber) (nitems + attno),
+								 pstrdup(""),
+								 false);
+			retqry->targetList = lappend(retqry->targetList, te);
+		}
+
+		nsitem = addRangeTableEntryForSubquery(pstate, retqry,
+											   makeAliasNoDup(CYPHER_SUBQUERY_ALIAS, NIL),
+											   false, true);
+		addNSItemToJoinlist(pstate, nsitem, true);
+
+		future_vertices = removeResolvedFutureVertices(future_vertices);
+		future_vertices = adjustFutureVertices(future_vertices, nsitem);
+		pstate->p_future_vertices = list_concat(pstate->p_future_vertices,
+												future_vertices);
+
+		/* outer columns first, under their original names */
+		attno = nitems + 1;
+		foreach(ln, boundary->outer_names)
+		{
+			TargetEntry *src = get_tle_by_resno(retqry->targetList, attno);
+			Var		   *var;
+			TargetEntry *te;
+
+			var = makeVar(nsitem->p_rtindex, attno,
+						  exprType((Node *) src->expr),
+						  exprTypmod((Node *) src->expr),
+						  exprCollation((Node *) src->expr),
+						  0);
+			te = makeTargetEntry((Expr *) var,
+								 (AttrNumber) pstate->p_next_resno++,
+								 pstrdup(strVal(lfirst(ln))),
+								 false);
+			qry->targetList = lappend(qry->targetList, te);
+			attno++;
+		}
+
+		/* then the returned items; names must be fresh and unique */
+		attno = 1;
+		for (lt = list_head(retqry->targetList);
+			 attno <= nitems;
+			 lt = lnext(retqry->targetList, lt), attno++)
+		{
+			TargetEntry *src = lfirst(lt);
+			char	   *name = src->resname ? src->resname : "";
+			Var		   *var;
+			TargetEntry *te;
+
+			if (name[0] != '\0')
+			{
+				ListCell   *lo;
+
+				foreach(lo, boundary->outer_names)
+				{
+					if (strcmp(strVal(lfirst(lo)), name) == 0)
+						ereport(ERROR,
+								(errcode(ERRCODE_DUPLICATE_ALIAS),
+								 errmsg("variable \"%s\" returned by the CALL subquery is already bound in the outer query",
+										name),
+								 parser_errposition(pstate, detail->location)));
+				}
+				if (findTarget(qry->targetList, name) != NULL)
+					ereport(ERROR,
+							(errcode(ERRCODE_DUPLICATE_ALIAS),
+							 errmsg("duplicate variable \"%s\" returned by the CALL subquery",
+									name),
+							 parser_errposition(pstate, detail->location)));
+			}
+
+			var = makeVar(nsitem->p_rtindex, attno,
+						  exprType((Node *) src->expr),
+						  exprTypmod((Node *) src->expr),
+						  exprCollation((Node *) src->expr),
+						  0);
+			te = makeTargetEntry((Expr *) var,
+								 (AttrNumber) pstate->p_next_resno++,
+								 pstrdup(name),
+								 false);
+			qry->targetList = lappend(qry->targetList, te);
+		}
+	}
+
+	markTargetListOrigins(pstate, qry->targetList);
+
+	qry->rtable = pstate->p_rtable;
+	qry->jointree = makeFromExpr(pstate->p_joinlist, NULL);
+	qry->rteperminfos = pstate->p_rteperminfos;
+	qry->hasSubLinks = pstate->p_hasSubLinks;
+	qry->hasGraphwriteClause = pstate->p_hasGraphwriteClause;
+
+	assign_query_collations(pstate, qry);
+
+	return qry;
+}
+
+/*
+ * transformCypherCallBoundary
+ *		Transform the outer working table for a composed write body and hide
+ *		the variables the CALL did not import.
+ *
+ *		This runs inside the ordinary clause recursion (it is the body
+ *		head\'s prev), so the per-statement ParseState bookkeeping -- write
+ *		clause numbering for the command-id windows, future vertices, entity
+ *		info, label validity -- flows exactly as for inline clauses.
+ *
+ *		Hiding blanks the column name.  Resolution matches names with
+ *		strcmp and the lexer rejects zero-length identifiers, so a ""-named
+ *		column cannot be referenced by the body (and star expansion skips
+ *		empty names); the column itself still flows positionally, and the
+ *		CALL\'s projection restores the original names afterwards.
+ */
+Query *
+transformCypherCallBoundary(ParseState *pstate, CypherClause *clause)
+{
+	CypherCallBoundary *detail = (CypherCallBoundary *) clause->detail;
+	Query	   *qry;
+	bool		import_all = callImportIsStar(detail->importlist);
+	ListCell   *lt;
+	ListCell   *li;
+
+	qry = makeNode(Query);
+	qry->commandType = CMD_SELECT;
+
+	/* the outer chain is not part of the accumulating body */
+	pstate->p_call_accumulate_sets = false;
+
+	if (clause->prev != NULL)
+	{
+		ParseNamespaceItem *nsitem;
+
+		nsitem = transformClause(pstate, clause->prev);
+		qry->targetList = makeTargetListFromNSItem(pstate, nsitem);
+	}
+	/* else: the CALL is the first clause; the body runs on one empty row */
+
+	/* every imported variable must name an existing outer variable */
+	if (!import_all)
+	{
+		foreach(li, detail->importlist)
+		{
+			char	   *varname = strVal(lfirst(li));
+			bool		found = false;
+
+			foreach(lt, qry->targetList)
+			{
+				TargetEntry *te = lfirst(lt);
+
+				if (!te->resjunk && te->resname != NULL &&
+					strcmp(te->resname, varname) == 0)
+				{
+					found = true;
+					break;
+				}
+			}
+			if (!found)
+				ereport(ERROR,
+						(errcode(ERRCODE_UNDEFINED_COLUMN),
+						 errmsg("variable \"%s\" to import into CALL does not exist",
+								varname),
+						 parser_errposition(pstate, detail->location)));
+		}
+	}
+
+	foreach(lt, qry->targetList)
+	{
+		TargetEntry *te = lfirst(lt);
+		bool		imported = import_all;
+
+		if (te->resjunk || te->resname == NULL)
+			continue;
+
+		detail->outer_names = lappend(detail->outer_names,
+									  makeString(pstrdup(te->resname)));
+
+		if (!import_all)
+		{
+			foreach(li, detail->importlist)
+			{
+				if (strcmp(strVal(lfirst(li)), te->resname) == 0)
+				{
+					imported = true;
+					break;
+				}
+			}
+		}
+		if (!imported)
+			te->resname = pstrdup("");
+	}
+
+	/*
+	 * A multiplying unit body needs to know which output rows came from
+	 * which input row: number the input rows.  The column is hidden like the
+	 * non-imported ones; the CALL\'s collapse keys on it by position.
+	 */
+	if (detail->add_rowid)
+	{
+		WindowFunc *wfunc = makeNode(WindowFunc);
+		WindowClause *wc = makeNode(WindowClause);
+		TargetEntry *te;
+
+		wfunc->winfnoid = F_ROW_NUMBER;
+		wfunc->wintype = INT8OID;
+		wfunc->wincollid = InvalidOid;
+		wfunc->inputcollid = InvalidOid;
+		wfunc->args = NIL;
+		wfunc->aggfilter = NULL;
+		wfunc->runCondition = NIL;
+		wfunc->winref = 1;
+		wfunc->winstar = false;
+		wfunc->winagg = false;
+		wfunc->location = -1;
+
+		wc->name = NULL;
+		wc->refname = NULL;
+		wc->partitionClause = NIL;
+		wc->orderClause = NIL;
+		wc->frameOptions = FRAMEOPTION_DEFAULTS;
+		wc->startOffset = NULL;
+		wc->endOffset = NULL;
+		wc->startInRangeFunc = InvalidOid;
+		wc->endInRangeFunc = InvalidOid;
+		wc->inRangeColl = InvalidOid;
+		wc->inRangeAsc = false;
+		wc->inRangeNullsFirst = false;
+		wc->winref = 1;
+		wc->copiedOrder = false;
+
+		te = makeTargetEntry((Expr *) wfunc,
+							 (AttrNumber) pstate->p_next_resno++,
+							 pstrdup(""),
+							 false);
+		qry->targetList = lappend(qry->targetList, te);
+		qry->windowClause = list_make1(wc);
+		qry->hasWindowFuncs = true;
+	}
+
+	qry->rtable = pstate->p_rtable;
+	qry->jointree = makeFromExpr(pstate->p_joinlist, NULL);
+	qry->rteperminfos = pstate->p_rteperminfos;
+	qry->hasSubLinks = pstate->p_hasSubLinks;
+	qry->hasGraphwriteClause = pstate->p_hasGraphwriteClause;
+
+	assign_query_collations(pstate, qry);
+
+	detail->wrapper = qry;
+
+	return qry;
+}
+
+/*
  * callImportIsStar
  *		The CALL (*) sentinel: an import list that is the single A_Star node,
  *		meaning "import every outer variable".  makeCallImportNSItem skips its
@@ -1710,6 +3305,10 @@ transformCypherCallClause(ParseState *pstate, CypherClause *clause)
 	bool		has_col;
 	ListCell   *lc;
 
+	/* a body containing writes takes the composition path */
+	if (callStmtHasWrite(detail->subquery))
+		return transformCypherCallWriteBody(pstate, clause);
+
 	qry = makeNode(Query);
 	qry->commandType = CMD_SELECT;
 
@@ -1758,8 +3357,8 @@ transformCypherCallClause(ParseState *pstate, CypherClause *clause)
 	pstate->p_expr_kind = EXPR_KIND_NONE;
 	pstate->p_namespace = saved_namespace;
 
-	/* A read-only CALL: reject a write body (the grammar also excludes it). */
-	if (subqry->commandType != CMD_SELECT)
+	/* This is the read path: reject any body that writes. */
+	if (subqry->commandType != CMD_SELECT || subqry->hasGraphwriteClause)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("a write clause is not allowed in a CALL subquery"),
@@ -7238,6 +8837,7 @@ transformClauseImpl(ParseState *pstate, Node *clause,
 	childParseState->p_is_fp_processed = pstate->p_is_fp_processed;
 	childParseState->p_is_optional_match = pstate->p_is_optional_match;
 	childParseState->p_valid_labels = pstate->p_valid_labels;
+	childParseState->p_call_accumulate_sets = pstate->p_call_accumulate_sets;
 
 	qry = transform(childParseState, clause);
 

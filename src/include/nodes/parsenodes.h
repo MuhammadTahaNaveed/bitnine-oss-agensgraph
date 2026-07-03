@@ -279,6 +279,12 @@ typedef struct Query
 	List	   *g_sets;
 	List	   *g_resultRelations;
 	Node	   *g_vle_rel;
+	/* skip the write for a row whose gate column is NULL (0 = no gate) */
+	AttrNumber	g_writeGateAttno pg_node_attr(query_jumble_ignore);
+	/* evaluate SET items against per-row accumulated element state */
+	bool		g_accumulate pg_node_attr(query_jumble_ignore);
+	/* surface each row's own accumulated value (a returning CALL body) */
+	bool		g_accumOwnValues pg_node_attr(query_jumble_ignore);
 } Query;
 
 
@@ -4612,6 +4618,27 @@ typedef struct CypherCallClause
 								 * import every outer variable. */
 	int			location;
 } CypherCallClause;
+
+/*
+ * The boundary between a CALL clause's outer working table and a write body
+ * composed into the clause pipeline.  This is an internal clause detail the
+ * grammar never produces: transformCypherCallClause chains a copy of the
+ * body's clauses onto a CypherClause carrying this node, and its transform
+ * -- run inside the ordinary clause recursion, so that every per-statement
+ * ParseState bookkeeping behaves exactly as for inline clauses -- transforms
+ * the outer chain and wraps it so that only the imported variables are
+ * visible to the body.  See transformCypherCallBoundary().
+ */
+typedef struct CypherCallBoundary
+{
+	NodeTag		type;
+	List	   *importlist;		/* as in CypherCallClause */
+	int			location;		/* location of the owning CALL */
+	bool		add_rowid;		/* append a row_number() column (unit bodies
+								 * whose reads multiply the rows) */
+	Query	   *wrapper;		/* out: the hiding wrapper the transform built */
+	List	   *outer_names;	/* out: original names of the outer columns */
+} CypherCallBoundary;
 
 typedef enum CPathKind
 {

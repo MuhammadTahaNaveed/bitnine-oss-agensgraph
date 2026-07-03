@@ -246,6 +246,8 @@ struct ParseState
 	Oid			p_lc_elem_type; /* element type of lc iteration variable */
 	bool		p_is_match_quals;
 	bool		p_valid_labels;
+	/* SET clauses being transformed belong to an accumulating CALL body */
+	bool		p_call_accumulate_sets;
 	bool		p_is_fp_processed;
 	List	   *p_entity_info_list; /* final shape of named entities */
 	Node	   *p_vle_initial_vid;	/* initial vid for VLE */

@@ -36,6 +36,30 @@ static Datum GraphTableTupleUpdate(ModifyGraphState *mgstate,
 								   int attidx);
 
 /*
+ * ExecSetGraphAccum
+ *
+ * SET for an accumulating CALL body: evaluate every item against the row's
+ * accumulated element state (the modified-element table holds the freshest
+ * value of each element touched so far), record the result there, and carry
+ * the row's own value in the output slot -- so each row observes the
+ * previous rows' updates and surfaces its own.  The heap is written once per
+ * element when the clause finishes (reflectModifiedProp), like MERGE's
+ * ON MATCH / ON CREATE SET, which uses the same evaluator.
+ */
+TupleTableSlot *
+ExecSetGraphAccum(ModifyGraphState *mgstate, TupleTableSlot *slot)
+{
+	ExprContext *econtext = mgstate->ps.ps_ExprContext;
+
+	ResetExprContext(econtext);
+	econtext->ecxt_scantuple = slot;
+	econtext->ecxt_innertuple = slot;
+	econtext->ecxt_outertuple = slot;
+
+	return LegacyExecSetGraph(mgstate, slot, GSP_NORMAL);
+}
+
+/*
  * LegacyExecSetGraph
  *
  * It is used for Merge statements or Eager.
@@ -718,7 +742,8 @@ updateElementTable(ModifyGraphState *mgstate, Datum gid, Datum newelem)
 	entry = hash_search(mgstate->elemTable, &gid, HASH_ENTER, &found);
 	if (found)
 	{
-		if (enable_multiple_update)
+		if (enable_multiple_update ||
+			((ModifyGraph *) mgstate->ps.plan)->accumulate)
 			pfree(DatumGetPointer(entry->elem));
 		else
 			ereport(WARNING,
