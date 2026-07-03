@@ -166,9 +166,18 @@ ExecInitModifyGraph(ModifyGraph *mgplan, EState *estate, int eflags)
 	EvalPlanQualSetPlan(&mgstate->mt_epqstate, mgplan->subplan,
 						mgstate->mt_arowmarks[0]);
 
-	/* Fill eager action information */
+	/*
+	 * Fill eager action information.
+	 *
+	 * A SET clause always needs the modified-element table: it is how a
+	 * repeated update of the same element within one clause is detected, both
+	 * to apply the update only once (enable_multiple_update) and to warn
+	 * about the repetition (!enable_multiple_update) -- the update paths
+	 * probe it unconditionally.  Likewise DELETE uses it to skip an element
+	 * that was already deleted.
+	 */
 	if (mgstate->eagerness ||
-		(mgstate->sets != NIL && enable_multiple_update) ||
+		mgstate->sets != NIL ||
 		mgstate->exprs != NIL)
 	{
 		HASHCTL		ctl;

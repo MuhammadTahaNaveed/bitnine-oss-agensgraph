@@ -3753,6 +3753,22 @@ RETURN a.no;
  8
 (2 rows)
 
+-- a terminal update clause (no trailing RETURN) must also detect repeated
+-- updates of the same element instead of crashing
+MATCH (a:multiple_update), (b:multiple_update)
+SET a.no = a.no;
+WARNING:  graph element(5,1) has been SET multiple times
+WARNING:  graph element(5,2) has been SET multiple times
+MERGE (a:multiple_update {no: 8})
+ON MATCH SET a.no = a.no;
+MATCH (a:multiple_update)
+RETURN a.no;
+ no 
+----
+ 8
+ 8
+(2 rows)
+
 SET enable_multiple_update = true;
 MATCH (a:multiple_update), (b:multiple_update)
 SET a.no = a.no + 1

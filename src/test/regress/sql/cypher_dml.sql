@@ -1324,6 +1324,17 @@ RETURN a.no;
 MATCH (a:multiple_update)
 RETURN a.no;
 
+-- a terminal update clause (no trailing RETURN) must also detect repeated
+-- updates of the same element instead of crashing
+MATCH (a:multiple_update), (b:multiple_update)
+SET a.no = a.no;
+
+MERGE (a:multiple_update {no: 8})
+ON MATCH SET a.no = a.no;
+
+MATCH (a:multiple_update)
+RETURN a.no;
+
 SET enable_multiple_update = true;
 
 MATCH (a:multiple_update), (b:multiple_update)
