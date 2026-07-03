@@ -1413,6 +1413,14 @@ MATCH (a:person {name: 'agens'})
 
 MATCH (a:person {name: 'agens'}) RETURN properties(a);
 
+-- a WHERE after an update clause filters the rows that flow on; it must not
+-- be pushed down below the update, which would silently skip writes
+CREATE (:pushq {no: 1}), (:pushq {no: 2});
+MATCH (n:pushq) SET n.p = 100 WITH n WHERE n.no = 1 RETURN n.no, n.p;
+MATCH (n:pushq) RETURN n.no, n.p ORDER BY n.no;
+EXPLAIN (COSTS OFF)
+MATCH (n:pushq) SET n.p = 100 WITH n WHERE n.no = 1 RETURN n.no, n.p;
+
 --
 -- MERGE
 --

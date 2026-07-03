@@ -3943,6 +3943,32 @@ MATCH (a:person {name: 'agens'}) RETURN properties(a);
  {"name": "agens"}
 (1 row)
 
+-- a WHERE after an update clause filters the rows that flow on; it must not
+-- be pushed down below the update, which would silently skip writes
+CREATE (:pushq {no: 1}), (:pushq {no: 2});
+MATCH (n:pushq) SET n.p = 100 WITH n WHERE n.no = 1 RETURN n.no, n.p;
+ no |  p  
+----+-----
+ 1  | 100
+(1 row)
+
+MATCH (n:pushq) RETURN n.no, n.p ORDER BY n.no;
+ no |  p  
+----+-----
+ 1  | 100
+ 2  | 100
+(2 rows)
+
+EXPLAIN (COSTS OFF)
+MATCH (n:pushq) SET n.p = 100 WITH n WHERE n.no = 1 RETURN n.no, n.p;
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Subquery Scan on _agens_default_s
+   Filter: ((_agens_default_s.n).properties.'no'::text = '1'::jsonb)
+   ->  Graph Set eager
+         ->  Seq Scan on pushq n
+(4 rows)
+
 --
 -- MERGE
 --
@@ -8518,7 +8544,7 @@ drop cascades to elabel ag_edge
 drop cascades to vlabel v
 drop cascades to vlabel w
 DROP GRAPH p CASCADE;
-NOTICE:  drop cascades to 7 other objects
+NOTICE:  drop cascades to 8 other objects
 DETAIL:  drop cascades to sequence p.ag_label_seq
 drop cascades to vlabel ag_vertex
 drop cascades to elabel ag_edge
@@ -8526,6 +8552,7 @@ drop cascades to elabel rel
 drop cascades to vlabel bug_ag279
 drop cascades to vlabel multiple_update
 drop cascades to vlabel person
+drop cascades to vlabel pushq
 DROP GRAPH u CASCADE;
 NOTICE:  drop cascades to 4 other objects
 DETAIL:  drop cascades to sequence u.ag_label_seq

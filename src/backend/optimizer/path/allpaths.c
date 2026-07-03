@@ -3545,6 +3545,14 @@ standard_join_search(PlannerInfo *root, int levels_needed, List *initial_rels)
  * so long as subquery_planner can't move HAVING clauses to WHERE within such
  * a subquery.)
  *
+ * 7. If the subquery is a graph-write query (a Cypher update clause), we
+ * must not push down any quals.  Its ModifyGraph step applies a write for
+ * every row its jointree produces, so a pushed-down qual would not merely
+ * filter the subquery's output -- it would filter the write's input rows and
+ * silently skip modifications.  A qual above the subquery (e.g. a WHERE on a
+ * later WITH) filters only the rows that flow on, which is the Cypher
+ * clause-pipeline semantics.
+ *
  * In addition, we make several checks on the subquery's output columns to see
  * if it is safe to reference them in pushed-down quals.  If output column k
  * is found to be unsafe to reference, we set the reason for that inside
@@ -3584,6 +3592,10 @@ subquery_is_pushdown_safe(Query *subquery, Query *topquery,
 						  pushdown_safety_info *safetyInfo)
 {
 	SetOperationStmt *topop;
+
+	/* Check point 7 */
+	if (subquery->commandType == CMD_GRAPHWRITE)
+		return false;
 
 	/* Check point 1 */
 	if (subquery->limitOffset != NULL || subquery->limitCount != NULL)
