@@ -3584,6 +3584,17 @@ MATCH ()-[r:rel]->() RETURN count(r);
  0
 (1 row)
 
+-- consecutive DELETE clauses of different modes: both must apply
+CREATE (:v1 {m: 1}), (:v2 {m: 2});
+MATCH (a:v1 {m: 1}), (b:v2 {m: 2})
+DELETE a
+DETACH DELETE b;
+MATCH (n) WHERE n.m IS NOT NULL RETURN count(*) AS should_be_0;
+ should_be_0 
+-------------
+ 0
+(1 row)
+
 -- AG-159
 CREATE (:v1), (:v2);
 MATCH p=(a:v1), (b:v2)

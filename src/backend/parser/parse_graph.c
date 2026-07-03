@@ -1070,15 +1070,20 @@ transformCypherDeleteClause(ParseState *pstate, CypherClause *clause)
 	/* DELETE cannot be the first clause */
 	Assert(clause->prev != NULL);
 
-	/* Merge same mode of DELETE clauses for reducing delete join */
+	/*
+	 * Merge same mode of DELETE clauses for reducing delete join.  A
+	 * preceding DELETE of the other mode stays a clause of its own; it must
+	 * not be spliced out of the chain, or its targets would silently survive.
+	 */
 	while (cypherClauseTag(clause->prev) == T_CypherDeleteClause)
 	{
 		CypherClause *prev = (CypherClause *) clause->prev;
 		CypherDeleteClause *prevDel = (CypherDeleteClause *) prev->detail;
 
-		if (prevDel->detach == detail->detach)
-			detail->exprs = list_concat(prevDel->exprs, detail->exprs);
+		if (prevDel->detach != detail->detach)
+			break;
 
+		detail->exprs = list_concat(prevDel->exprs, detail->exprs);
 		clause->prev = prev->prev;
 	}
 

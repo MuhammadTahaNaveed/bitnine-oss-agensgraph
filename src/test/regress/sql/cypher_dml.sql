@@ -1230,6 +1230,15 @@ DELETE p, gp, a;
 MATCH (a) RETURN count(a);
 MATCH ()-[r:rel]->() RETURN count(r);
 
+-- consecutive DELETE clauses of different modes: both must apply
+CREATE (:v1 {m: 1}), (:v2 {m: 2});
+
+MATCH (a:v1 {m: 1}), (b:v2 {m: 2})
+DELETE a
+DETACH DELETE b;
+
+MATCH (n) WHERE n.m IS NOT NULL RETURN count(*) AS should_be_0;
+
 -- AG-159
 CREATE (:v1), (:v2);
 
