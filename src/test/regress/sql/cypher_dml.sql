@@ -1135,6 +1135,18 @@ OPTIONAL MATCH (a)-[r:no_such_type]->(z:no_such_label)
 SET a.opt = 1
 RETURN a.name, a.opt;
 
+-- a SET must not corrupt the NULL-ness of element columns it does not touch
+MATCH (a {name: 'agensgraph'})
+OPTIONAL MATCH (a)-[r:no_such_type]->(z:no_such_label)
+SET a.opt = 2
+RETURN a.opt, r IS NULL AS rnull, z IS NULL AS znull;
+
+-- ... while a SET value referencing another element still sees that
+-- element's post-SET state within the same clause
+MATCH (a {name: 'agensgraph'}), (g {name: 'bitnine'})
+SET a.swap = g.name, g.swap = a.name
+RETURN a.swap, g.swap;
+
 MATCH (a {name: 'agensgraph'})
 OPTIONAL MATCH (a)-[r:no_such_type]->(z:no_such_label)
 DELETE z

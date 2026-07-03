@@ -5502,6 +5502,25 @@ resolve_var_from_targetlist_walker(Node *node,
 }
 
 /*
+ * set_props_needed_var_walker
+ *		Collect the Vars a SET item's expressions reference.
+ */
+static bool
+set_props_needed_var_walker(Node *node, List **vars)
+{
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, Var))
+	{
+		*vars = lappend(*vars, node);
+		return false;
+	}
+
+	return expression_tree_walker(node, set_props_needed_var_walker, vars);
+}
+
+/*
  * substitute_set_props_as_targetentry
  */
 static void
@@ -5510,22 +5529,71 @@ substitute_set_props_as_targetentry(ParseState *pstate, Query *query,
 {
 	ListCell   *cell;
 	List	   *ext_tle_lists = NIL;
+	List	   *needed_vars = NIL;
+
+	/*
+	 * Only the SET targets and the columns their value expressions reference
+	 * take part in the substitution below.  Every other element column must
+	 * keep its plain Var: rebuilding it as a RowExpr of its fields would turn
+	 * a NULL element (an OPTIONAL MATCH miss) into a non-NULL composite of
+	 * NULL fields, visibly corrupting "IS NULL" for columns the SET does not
+	 * even touch.
+	 */
+	foreach(cell, graphSetProps)
+	{
+		GraphSetProp *gsp = lfirst(cell);
+
+		(void) set_props_needed_var_walker(gsp->expr, &needed_vars);
+	}
 
 	foreach(cell, query->targetList)
 	{
 		TargetEntry *te = lfirst(cell);
+		Var		   *var;
+		bool		needed = false;
+		ListCell   *lv;
 
-		if (!te->resjunk)
+		if (te->resjunk)
+			continue;
+
+		var = (Var *) te->expr;
+
+		foreach(lv, graphSetProps)
+		{
+			GraphSetProp *gsp = lfirst(lv);
+
+			if (strcmp(gsp->variable, te->resname) == 0)
+			{
+				needed = true;
+				break;
+			}
+		}
+		if (!needed)
+		{
+			foreach(lv, needed_vars)
+			{
+				Var		   *nv = lfirst(lv);
+
+				if (IsA(var, Var) &&
+					nv->varno == var->varno && nv->varattno == var->varattno)
+				{
+					needed = true;
+					break;
+				}
+			}
+		}
+		if (!needed)
+			continue;
+
 		{
 			ExtTLE	   *ext_tle = palloc(sizeof(ExtTLE));
 
 			ext_tle->tle = te;
-			ext_tle->varattno = ((Var *) te->expr)->varattno;
-			ext_tle->varno = ((Var *) te->expr)->varno;
+			ext_tle->varattno = var->varattno;
+			ext_tle->varno = var->varno;
 			ext_tle->type = exprType((Node *) te->expr);
 			if (ext_tle->type == VERTEXOID)
 			{
-				/* todo: Need to  */
 				Expr	   *new_expr = (Expr *) makeTypedRowExpr(
 																 list_make3(
 																			getExprField(te->expr, AG_ELEM_LOCAL_ID),
