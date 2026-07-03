@@ -3412,6 +3412,47 @@ MATCH (a {name: 'agensgraph'}), (g {name: 'bitnine'})
 OPTIONAL MATCH (a)-[r:made_by]-(g)
 DELETE r;
 MATCH (a) DETACH DELETE a;
+-- a write clause after an OPTIONAL MATCH whose pattern names a label or type
+-- that does not exist: the row still flows (with NULLs) and the write must
+-- run against the valid targets -- SET/DELETE of the NULL variable is a no-op
+CREATE ({name: 'agensgraph'})-[:made_by]->({name: 'bitnine'});
+MATCH (a {name: 'agensgraph'})
+OPTIONAL MATCH (a)-[r:no_such_type]->(z:no_such_label)
+SET a.opt = 1
+RETURN a.name, a.opt;
+     name     | opt 
+--------------+-----
+ "agensgraph" | 1
+(1 row)
+
+MATCH (a {name: 'agensgraph'})
+OPTIONAL MATCH (a)-[r:no_such_type]->(z:no_such_label)
+DELETE z
+RETURN count(*) AS kept;
+ kept 
+------
+ 1
+(1 row)
+
+MATCH (a {name: 'agensgraph'})
+OPTIONAL MATCH (a)-[r:no_such_type]->(z:no_such_label)
+DETACH DELETE z
+RETURN count(*) AS kept;
+ kept 
+------
+ 1
+(1 row)
+
+MATCH (a {name: 'agensgraph'})
+OPTIONAL MATCH (a)-[r:no_such_type]->(z:no_such_label)
+DETACH DELETE a;
+MATCH (a) RETURN count(*) AS remaining;
+ remaining 
+-----------
+ 1
+(1 row)
+
+MATCH (a) DETACH DELETE a;
 -- AG-163 : DELETE plan passes 'edge' variable to the next plan.
 CREATE ({name:'AG-163'});
 MATCH (a {name:'AG-163'}) DELETE a RETURN *;
@@ -4918,20 +4959,20 @@ SET graph_path = agens;
 WITH graph as (MERGE (n) return n) SELECT * FROM graph;
          n         
 -------------------
- ag_vertex[1.32]{}
+ ag_vertex[1.34]{}
 (1 row)
 
 WITH graph as (CREATE (n) return n) SELECT * FROM graph;
          n         
 -------------------
- ag_vertex[1.33]{}
+ ag_vertex[1.35]{}
 (1 row)
 
 WITH graph as (MATCH (n) RETURN n) SELECT * FROM graph;
          n         
 -------------------
- ag_vertex[1.32]{}
- ag_vertex[1.33]{}
+ ag_vertex[1.34]{}
+ ag_vertex[1.35]{}
 (2 rows)
 
 WITH graph as (LOAD FROM history AS n RETURN n) SELECT * FROM graph;
@@ -4944,8 +4985,8 @@ WITH graph as (LOAD FROM history AS n RETURN n) SELECT * FROM graph;
 WITH graph as (MATCH (n) SET n.vertex = true RETURN n) SELECT * FROM graph;
                 n                
 ---------------------------------
- ag_vertex[1.32]{"vertex": true}
- ag_vertex[1.33]{"vertex": true}
+ ag_vertex[1.34]{"vertex": true}
+ ag_vertex[1.35]{"vertex": true}
 (2 rows)
 
 --
@@ -4968,7 +5009,7 @@ CREATE (n1 {name: 'test'}) WITH NULL AS a0 RETURN a0;
 MATCH (n1) WITH n1, 'test' as name WHERE n1.name = name RETURN n1;
                n1                
 ---------------------------------
- ag_vertex[1.34]{"name": "test"}
+ ag_vertex[1.36]{"name": "test"}
 (1 row)
 
 --

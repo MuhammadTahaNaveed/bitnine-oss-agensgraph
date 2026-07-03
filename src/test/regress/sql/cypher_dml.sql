@@ -1119,6 +1119,34 @@ DELETE r;
 
 MATCH (a) DETACH DELETE a;
 
+-- a write clause after an OPTIONAL MATCH whose pattern names a label or type
+-- that does not exist: the row still flows (with NULLs) and the write must
+-- run against the valid targets -- SET/DELETE of the NULL variable is a no-op
+CREATE ({name: 'agensgraph'})-[:made_by]->({name: 'bitnine'});
+
+MATCH (a {name: 'agensgraph'})
+OPTIONAL MATCH (a)-[r:no_such_type]->(z:no_such_label)
+SET a.opt = 1
+RETURN a.name, a.opt;
+
+MATCH (a {name: 'agensgraph'})
+OPTIONAL MATCH (a)-[r:no_such_type]->(z:no_such_label)
+DELETE z
+RETURN count(*) AS kept;
+
+MATCH (a {name: 'agensgraph'})
+OPTIONAL MATCH (a)-[r:no_such_type]->(z:no_such_label)
+DETACH DELETE z
+RETURN count(*) AS kept;
+
+MATCH (a {name: 'agensgraph'})
+OPTIONAL MATCH (a)-[r:no_such_type]->(z:no_such_label)
+DETACH DELETE a;
+
+MATCH (a) RETURN count(*) AS remaining;
+
+MATCH (a) DETACH DELETE a;
+
 -- AG-163 : DELETE plan passes 'edge' variable to the next plan.
 CREATE ({name:'AG-163'});
 

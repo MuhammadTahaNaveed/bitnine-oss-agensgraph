@@ -1142,9 +1142,18 @@ transformCypherDeleteClause(ParseState *pstate, CypherClause *clause)
 
 	assign_query_eager(qry);
 
+	/*
+	 * Register the modifiable labels even when a pattern named a label that
+	 * does not exist (p_valid_labels is false).  A plain MATCH on such a
+	 * label folds to a constant-false filter, so this clause never executes
+	 * -- but an OPTIONAL MATCH still passes its rows through with NULLs, and
+	 * the delete then runs against elements bound by other, valid patterns;
+	 * without the registration the executor fails with "invalid object ID
+	 * ... for the target label".  The folded pattern scans its kind's root
+	 * label, so the target resolution below works either way.
+	 */
 	targetPerms = ACL_DELETE;
-	if (pstate->p_valid_labels)
-		addRangeTableAllModifiedLabels(pstate, qry, NIL, targetPerms);
+	addRangeTableAllModifiedLabels(pstate, qry, NIL, targetPerms);
 
 	qry->rteperminfos = pstate->p_rteperminfos;
 
@@ -1225,9 +1234,9 @@ transformCypherSetClause(ParseState *pstate, CypherClause *clause)
 
 	assign_query_eager(qry);
 
+	/* see the corresponding comment in transformCypherDeleteClause */
 	targetPerms = ACL_UPDATE;
-	if (pstate->p_valid_labels)
-		addRangeTableAllModifiedLabels(pstate, qry, NIL, targetPerms);
+	addRangeTableAllModifiedLabels(pstate, qry, NIL, targetPerms);
 
 	qry->rteperminfos = pstate->p_rteperminfos;
 
@@ -6026,9 +6035,9 @@ transformDeleteEdges(ParseState *pstate, Node *parseTree)
 
 	assign_query_collations(pstate, qry);
 
+	/* see the corresponding comment in transformCypherDeleteClause */
 	targetPerms = ACL_DELETE;
-	if (pstate->p_valid_labels)
-		addRangeTableAllModifiedLabels(pstate, qry, NIL, targetPerms);
+	addRangeTableAllModifiedLabels(pstate, qry, NIL, targetPerms);
 	qry->rteperminfos = pstate->p_rteperminfos;
 
 	return qry;
@@ -6480,9 +6489,10 @@ addRangeTableAllModifiedLabels(ParseState *pstate, Query *qry,
 		foreach(lc, qry->g_exprs)
 		{
 			GraphDelElem *gde = lfirst(lc);
+			Oid			relid = find_target_label(gde->elem, qry);
 
-			label_oids = lappend_oid(label_oids,
-									 find_target_label(gde->elem, qry));
+			if (OidIsValid(relid))
+				label_oids = lappend_oid(label_oids, relid);
 		}
 	}
 
@@ -6492,9 +6502,10 @@ addRangeTableAllModifiedLabels(ParseState *pstate, Query *qry,
 		foreach(lc, qry->g_sets)
 		{
 			GraphSetProp *gsp = lfirst(lc);
+			Oid			relid = find_target_label(gsp->elem, qry);
 
-			label_oids = lappend_oid(label_oids,
-									 find_target_label(gsp->elem, qry));
+			if (OidIsValid(relid))
+				label_oids = lappend_oid(label_oids, relid);
 		}
 	}
 
@@ -6550,8 +6561,16 @@ find_target_label(Node *node, Query *qry)
 	ctx.resno = InvalidAttrNumber;
 	ctx.relid = InvalidOid;
 
+	/*
+	 * A target expression that resolves to no label relation can only come
+	 * from a pattern that was folded to a constant-false filter because it
+	 * named a label that does not exist (an OPTIONAL MATCH keeps its rows,
+	 * binding such variables to NULL).  The element is then NULL on every
+	 * row and the executor skips it, so there is no label to register:
+	 * return InvalidOid and let the caller ignore the target.
+	 */
 	if (!find_target_label_walker(node, &ctx))
-		elog(ERROR, "cannot find target label");
+		return InvalidOid;
 
 	Assert(ctx.relid != InvalidOid);
 	return ctx.relid;
