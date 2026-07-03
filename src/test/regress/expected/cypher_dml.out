@@ -386,6 +386,19 @@ EXPLAIN (COSTS OFF) CREATE (:person {name: 'G'}) FINISH;
    ->  Result
 (2 rows)
 
+-- COPY of a Cypher query: a write-terminated statement returns no rows and is
+-- rejected cleanly; one ending in RETURN works and applies its writes
+COPY (MATCH (n:person {name: 'A'}) SET n.copied = true) TO STDOUT;
+ERROR:  COPY query must return rows
+HINT:  End the Cypher query with RETURN.
+COPY (MATCH (n:person {name: 'A'}) SET n.copied = true RETURN n.name) TO STDOUT;
+"A"
+MATCH (n:person {name: 'A'}) RETURN n.copied;
+ copied 
+--------
+ true
+(1 row)
+
 DROP GRAPH finish_test CASCADE;
 NOTICE:  drop cascades to 5 other objects
 DETAIL:  drop cascades to sequence finish_test.ag_label_seq

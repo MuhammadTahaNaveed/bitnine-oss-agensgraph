@@ -200,6 +200,12 @@ MATCH (n) FINISH RETURN n;
 EXPLAIN (COSTS OFF) MATCH (n) FINISH;
 EXPLAIN (COSTS OFF) CREATE (:person {name: 'G'}) FINISH;
 
+-- COPY of a Cypher query: a write-terminated statement returns no rows and is
+-- rejected cleanly; one ending in RETURN works and applies its writes
+COPY (MATCH (n:person {name: 'A'}) SET n.copied = true) TO STDOUT;
+COPY (MATCH (n:person {name: 'A'}) SET n.copied = true RETURN n.name) TO STDOUT;
+MATCH (n:person {name: 'A'}) RETURN n.copied;
+
 DROP GRAPH finish_test CASCADE;
 
 --

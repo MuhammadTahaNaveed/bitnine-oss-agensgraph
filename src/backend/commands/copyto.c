@@ -495,6 +495,17 @@ BeginCopyTo(ParseState *pstate,
 		Assert(query->utilityStmt == NULL);
 
 		/*
+		 * A Cypher statement ending in a write clause returns no rows, so
+		 * there is nothing to COPY.  (One ending in RETURN is CMD_SELECT and
+		 * works like any other query.)
+		 */
+		if (query->commandType == CMD_GRAPHWRITE)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("COPY query must return rows"),
+					 errhint("End the Cypher query with RETURN.")));
+
+		/*
 		 * Similarly the grammar doesn't enforce the presence of a RETURNING
 		 * clause, but this is required here.
 		 */
