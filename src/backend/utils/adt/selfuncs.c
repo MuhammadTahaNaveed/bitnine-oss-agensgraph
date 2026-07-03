@@ -5702,6 +5702,37 @@ examine_simple_variable(PlannerInfo *root, Var *var,
 		if (rte->security_barrier)
 			return;
 
+		/*
+		 * row_number() over a window with no PARTITION BY numbers the
+		 * subquery's rows 1..N, so its output is unique.  That is a
+		 * structural fact, not a statistic, and it is all we can know about
+		 * the column -- without it the estimator falls back to
+		 * DEFAULT_NUM_DISTINCT, which can be off by orders of magnitude when
+		 * grouping or DISTINCT is applied to the value above the subquery.
+		 */
+		if (var && IsA(var, WindowFunc))
+		{
+			WindowFunc *wfunc = (WindowFunc *) var;
+
+			if (wfunc->winfnoid == F_ROW_NUMBER)
+			{
+				ListCell   *lcw;
+
+				foreach(lcw, subquery->windowClause)
+				{
+					WindowClause *wc = (WindowClause *) lfirst(lcw);
+
+					if (wc->winref == wfunc->winref)
+					{
+						if (wc->partitionClause == NIL)
+							vardata->isunique = true;
+						break;
+					}
+				}
+			}
+			return;
+		}
+
 		/* Can only handle a simple Var of subquery's query level */
 		if (var && IsA(var, Var) &&
 			var->varlevelsup == 0)

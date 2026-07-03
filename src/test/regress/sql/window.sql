@@ -1951,3 +1951,29 @@ $$ LANGUAGE SQL STABLE;
 
 EXPLAIN (costs off) SELECT * FROM pg_temp.f(2);
 SELECT * FROM pg_temp.f(2);
+
+-- row_number() over an empty window numbers the rows 1..N, so its output is
+-- unique: DISTINCT/grouping on it must be estimated at the input row count,
+-- not DEFAULT_NUM_DISTINCT.  A PARTITION BY breaks global uniqueness, so that
+-- case must keep the conservative default.
+CREATE TABLE rownum_est (i int);
+INSERT INTO rownum_est SELECT g FROM generate_series(1, 5000) g;
+ANALYZE rownum_est;
+CREATE FUNCTION rownum_est_rows(query text) RETURNS float8 AS $$
+DECLARE
+    j json;
+BEGIN
+    EXECUTE 'EXPLAIN (FORMAT JSON) ' || query INTO j;
+    RETURN (j -> 0 -> 'Plan' ->> 'Plan Rows')::float8;
+END;
+$$ LANGUAGE plpgsql;
+SELECT rownum_est_rows(
+  'SELECT DISTINCT ON (r) i FROM
+     (SELECT row_number() OVER () AS r, i FROM rownum_est) s ORDER BY r'
+) > 1000 AS unique_rownum_estimated_as_input_rows;
+SELECT rownum_est_rows(
+  'SELECT DISTINCT ON (r) i FROM
+     (SELECT row_number() OVER (PARTITION BY i % 10) AS r, i FROM rownum_est) s ORDER BY r'
+) < 1000 AS partitioned_rownum_keeps_default;
+DROP FUNCTION rownum_est_rows(text);
+DROP TABLE rownum_est;
