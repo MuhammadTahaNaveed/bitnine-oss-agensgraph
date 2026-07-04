@@ -744,7 +744,6 @@ MATCH (w:WP) CALL (w) { SET w.x = 1 RETURN 1 AS a, 2 AS a } RETURN a;
 -- reads that would observe the body's own writes
 MATCH (w:WP) CALL (w) { MATCH (m:WP) CREATE (:WP {c: 1}) };
 MATCH (w:WP) CALL (w) { MATCH (m) CREATE (:WANY {c: 1}) };
-MATCH (w:WP) CALL (w) { MATCH (m:WP) WHERE m.age > 0 SET m.age = 1 };
 MATCH (w:WP) CALL (w) { MATCH (m:WP {age: 30}) SET m.age = 31 };
 MATCH (w:WP) CALL (w) { SET w.age = 1 CREATE (:WA {v: w.age}) };
 -- per-row shapes not supported yet
@@ -775,6 +774,39 @@ WITH t AS (MATCH (w:WP) CALL (w) { SET w.g = 1 } RETURN w.name AS n) SELECT * FR
 -- a returning CALL cannot end the statement
 MATCH (w:WP) CALL (w) { SET w.x = 1 RETURN 1 AS a };
 MATCH (w:WP) CALL (w) { MATCH (d:WD) RETURN d.name AS dn };
+
+-- 7.8a conditional read-modify-write: the WHERE folds into the SET ----------
+
+-- the ceiling pattern: each row's decision observes the previous rows'
+-- updates, so the counter converges instead of overshooting
+CREATE (:WCEIL {count: 20});
+UNWIND [1,2,3,4,5] AS x MATCH (c:WCEIL)
+CALL (c) { MATCH (c) WHERE c.count < 23 SET c.count = c.count + 1 };
+MATCH (c:WCEIL) RETURN c.count AS converges_at_23;
+
+-- a pattern body: the gate applies per matched element, per row; a row whose
+-- pattern matches nothing still comes out
+CREATE (:WOWN {name:'o1'})-[:WFEED]->(:WPET {hunger: 5}),
+       (:WOWN {name:'o2'})-[:WFEED]->(:WPET {hunger: 1});
+CREATE (:WOWN {name:'nopets'});
+MATCH (o:WOWN) CALL (o) { MATCH (o)-[e:WFEED]->(p:WPET) WHERE p.hunger > 2
+                          SET p.hunger = p.hunger - 4 }
+RETURN o.name ORDER BY o.name;
+MATCH (p:WPET) RETURN p.hunger ORDER BY p.hunger;
+
+-- SET += folds with an empty-map no-op branch
+CREATE (:WACC2 {n: 0});
+UNWIND [5,6,7] AS x MATCH (a:WACC2)
+CALL (a, x) { MATCH (a) WHERE a.n < 6 SET a += {n: x} };
+MATCH (a:WACC2) RETURN a.n AS stops_at_6;
+
+-- the fold stays out of returning bodies (the WHERE decides their output)
+MATCH (c:WCEIL) CALL (c) { MATCH (c) WHERE c.count < 23
+                           SET c.count = c.count + 1 RETURN c.count AS cc }
+RETURN cc;
+-- a WHERE over properties nothing in the body writes needs no fold at all
+MATCH (w:WP) CALL (w) { MATCH (m:WP) WHERE m.age > 0 CREATE (:WGC {v: m.age}) };
+MATCH (g:WGC) RETURN count(*) AS gated_creates;
 
 -- 7.8b regressions from adversarial review ----------------------------------
 

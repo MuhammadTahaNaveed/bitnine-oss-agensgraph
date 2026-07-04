@@ -1538,11 +1538,6 @@ ERROR:  a CALL subquery body cannot create into a label its own MATCH reads
 LINE 1: MATCH (w:WP) CALL (w) { MATCH (m) CREATE (:WANY {c: 1}) };
                      ^
 DETAIL:  Each execution of the body would observe the previous executions' creations.
-MATCH (w:WP) CALL (w) { MATCH (m:WP) WHERE m.age > 0 SET m.age = 1 };
-ERROR:  the MATCH of a CALL subquery body cannot read a property the body writes
-LINE 1: MATCH (w:WP) CALL (w) { MATCH (m:WP) WHERE m.age > 0 SET m.a...
-                     ^
-DETAIL:  Each execution of the body would observe the previous executions' updates.
 MATCH (w:WP) CALL (w) { MATCH (m:WP {age: 30}) SET m.age = 31 };
 ERROR:  the MATCH of a CALL subquery body cannot read a property the body writes
 LINE 1: MATCH (w:WP) CALL (w) { MATCH (m:WP {age: 30}) SET m.age = 3...
@@ -1635,6 +1630,66 @@ MATCH (w:WP) CALL (w) { SET w.x = 1 RETURN 1 AS a };
 ERROR:  Cypher query must end with RETURN, FINISH or update clause
 MATCH (w:WP) CALL (w) { MATCH (d:WD) RETURN d.name AS dn };
 ERROR:  Cypher query must end with RETURN, FINISH or update clause
+-- 7.8a conditional read-modify-write: the WHERE folds into the SET ----------
+-- the ceiling pattern: each row's decision observes the previous rows'
+-- updates, so the counter converges instead of overshooting
+CREATE (:WCEIL {count: 20});
+UNWIND [1,2,3,4,5] AS x MATCH (c:WCEIL)
+CALL (c) { MATCH (c) WHERE c.count < 23 SET c.count = c.count + 1 };
+MATCH (c:WCEIL) RETURN c.count AS converges_at_23;
+ converges_at_23 
+-----------------
+ 23
+(1 row)
+
+-- a pattern body: the gate applies per matched element, per row; a row whose
+-- pattern matches nothing still comes out
+CREATE (:WOWN {name:'o1'})-[:WFEED]->(:WPET {hunger: 5}),
+       (:WOWN {name:'o2'})-[:WFEED]->(:WPET {hunger: 1});
+CREATE (:WOWN {name:'nopets'});
+MATCH (o:WOWN) CALL (o) { MATCH (o)-[e:WFEED]->(p:WPET) WHERE p.hunger > 2
+                          SET p.hunger = p.hunger - 4 }
+RETURN o.name ORDER BY o.name;
+   name   
+----------
+ "nopets"
+ "o1"
+ "o2"
+(3 rows)
+
+MATCH (p:WPET) RETURN p.hunger ORDER BY p.hunger;
+ hunger 
+--------
+ 1
+ 1
+(2 rows)
+
+-- SET += folds with an empty-map no-op branch
+CREATE (:WACC2 {n: 0});
+UNWIND [5,6,7] AS x MATCH (a:WACC2)
+CALL (a, x) { MATCH (a) WHERE a.n < 6 SET a += {n: x} };
+MATCH (a:WACC2) RETURN a.n AS stops_at_6;
+ stops_at_6 
+------------
+ 6
+(1 row)
+
+-- the fold stays out of returning bodies (the WHERE decides their output)
+MATCH (c:WCEIL) CALL (c) { MATCH (c) WHERE c.count < 23
+                           SET c.count = c.count + 1 RETURN c.count AS cc }
+RETURN cc;
+ERROR:  the MATCH of a CALL subquery body that returns rows cannot read a property the body writes
+LINE 1: MATCH (c:WCEIL) CALL (c) { MATCH (c) WHERE c.count < 23
+                        ^
+DETAIL:  Each execution of the body would observe the previous executions' updates.
+-- a WHERE over properties nothing in the body writes needs no fold at all
+MATCH (w:WP) CALL (w) { MATCH (m:WP) WHERE m.age > 0 CREATE (:WGC {v: m.age}) };
+MATCH (g:WGC) RETURN count(*) AS gated_creates;
+ gated_creates 
+---------------
+ 4
+(1 row)
+
 -- 7.8b regressions from adversarial review ----------------------------------
 -- an accumulating body composes with later writes on the same element
 CREATE (:WACC {c: 0, junk: 'x'});
@@ -1686,7 +1741,7 @@ MATCH (o:WPO) RETURN o.z AS stored;
 
 -- reads the commutation checks cannot see are rejected
 UNWIND [1,2] AS x CALL () { MATCH (m:WPO) WHERE NOT jsonb_exists(properties(m), 'p') SET m.p = 1 RETURN 1 AS hit } RETURN x;
-ERROR:  the MATCH of a CALL subquery body cannot read a property the body writes
+ERROR:  the MATCH of a CALL subquery body that returns rows cannot read a property the body writes
 LINE 1: UNWIND [1,2] AS x CALL () { MATCH (m:WPO) WHERE NOT jsonb_ex...
                           ^
 DETAIL:  Each execution of the body would observe the previous executions' updates.
@@ -1777,7 +1832,7 @@ MATCH (w:WP) WHERE w.lp IS NOT NULL RETURN count(*) AS rolled_back;
 DROP FUNCTION call_write_loops(text);
 -- cleanup
 DROP GRAPH cypher_call CASCADE;
-NOTICE:  drop cascades to 28 other objects
+NOTICE:  drop cascades to 34 other objects
 DETAIL:  drop cascades to sequence cypher_call.ag_label_seq
 drop cascades to vlabel ag_vertex
 drop cascades to elabel ag_edge
@@ -1802,6 +1857,12 @@ drop cascades to vlabel wcopy
 drop cascades to vlabel wlog2
 drop cascades to vlabel wempty
 drop cascades to vlabel wcounter
+drop cascades to vlabel wceil
+drop cascades to vlabel wown
+drop cascades to elabel wfeed
+drop cascades to vlabel wpet
+drop cascades to vlabel wacc2
+drop cascades to vlabel wgc
 drop cascades to vlabel wacc
 drop cascades to vlabel wdg
 drop cascades to elabel wowns

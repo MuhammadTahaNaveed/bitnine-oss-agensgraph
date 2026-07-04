@@ -2065,16 +2065,13 @@ collectPropMapReads(Node *prop_map, CallPropSet *props)
 }
 
 /*
- * collectMatchReadProps
- *		The property names a MATCH reads: its WHERE and the property
- *		constraints of its pattern.
+ * collectMatchPropMapReads
+ *		The property names a MATCH's pattern constraints read.
  */
 static void
-collectMatchReadProps(CypherMatchClause *match, CallPropSet *props)
+collectMatchPropMapReads(CypherMatchClause *match, CallPropSet *props)
 {
 	ListCell   *lp;
-
-	(void) collectReadPropsWalker(match->where, props);
 
 	foreach(lp, match->pattern)
 	{
@@ -2111,6 +2108,8 @@ typedef struct CallBodyShape
 	int			nwrites;
 	bool		accumulate;		/* a SET reads properties: evaluate the body's
 								 * SETs against per-row accumulated state */
+	bool		fold_where;		/* fold the MATCH's WHERE into the SET items
+								 * as a per-row gate (conditional RMW) */
 } CallBodyShape;
 
 /*
@@ -2132,8 +2131,10 @@ callBodyClassify(ParseState *pstate, CypherCallClause *detail,
 	Oid			graph_oid = get_graph_path_oid();
 	bool		seen_write = false;
 	bool		have_sole_write = false;	/* MERGE or DELETE seen */
+	bool		all_plain_sets = true;	/* only non-REMOVE SET clauses */
 	List	   *match_relids = NIL;
-	CallPropSet match_reads = {NIL, false};
+	CallPropSet where_reads = {NIL, false};
+	CallPropSet propmap_reads = {NIL, false};
 	CallPropSet set_writes = {NIL, false};
 	CallPropSet create_reads = {NIL, false};
 
@@ -2213,7 +2214,8 @@ callBodyClassify(ParseState *pstate, CypherCallClause *detail,
 								 parser_errposition(pstate, loc)));
 
 					shape->lead_match = c;
-					collectMatchReadProps(m, &match_reads);
+					(void) collectReadPropsWalker(m->where, &where_reads);
+					collectMatchPropMapReads(m, &propmap_reads);
 				}
 				break;
 
@@ -2223,6 +2225,7 @@ callBodyClassify(ParseState *pstate, CypherCallClause *detail,
 					List	   *pattern;
 					ListCell   *lp;
 
+					all_plain_sets = false;
 					if (cypherClauseTag(c) == T_CypherCreateClause)
 						pattern = ((CypherCreateClause *) c->detail)->pattern;
 					else
@@ -2232,6 +2235,7 @@ callBodyClassify(ParseState *pstate, CypherCallClause *detail,
 
 						pattern = mg->pattern;
 						have_sole_write = true;
+						all_plain_sets = false;
 
 						/*
 						 * ON MATCH / ON CREATE SET evaluate per merged row
@@ -2315,12 +2319,23 @@ callBodyClassify(ParseState *pstate, CypherCallClause *detail,
 					 * body observes its predecessors); route the body\'s
 					 * SETs through the accumulating evaluator.
 					 */
+					if (sc->is_remove)
+						all_plain_sets = false;
 					foreach(li, sc->items)
 					{
 						CypherSetProp *sp = lfirst(li);
 
 						callBodyCheckExpr(pstate, sp->expr, loc);
 						callBodyCheckExpr(pstate, sp->prop, loc);
+
+						/*
+						 * A whole-map assignment has no per-property ELSE
+						 * branch for the gate fold below.
+						 */
+						if (!sp->add &&
+							!(IsA(sp->prop, ColumnRef) &&
+							  list_length(((ColumnRef *) sp->prop)->fields) > 1))
+							all_plain_sets = false;
 					}
 					if (!sc->is_remove)
 					{
@@ -2348,6 +2363,7 @@ callBodyClassify(ParseState *pstate, CypherCallClause *detail,
 							 errmsg("DELETE is not supported in a CALL subquery body that returns rows yet"),
 							 parser_errposition(pstate, loc)));
 				have_sole_write = true;
+				all_plain_sets = false;
 				seen_write = true;
 				shape->nwrites++;
 				break;
@@ -2431,12 +2447,40 @@ callBodyClassify(ParseState *pstate, CypherCallClause *detail,
 	 * be read by the body\'s MATCH or by a created element\'s property map --
 	 * per-row execution would observe the previous rows\' updates there.
 	 */
-	if (callPropSetsIntersect(&set_writes, &match_reads))
+	if (callPropSetsIntersect(&set_writes, &propmap_reads))
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("the MATCH of a CALL subquery body cannot read a property the body writes"),
 				 errdetail("Each execution of the body would observe the previous executions\' updates."),
 				 parser_errposition(pstate, loc)));
+
+	if (callPropSetsIntersect(&set_writes, &where_reads))
+	{
+		/*
+		 * The WHERE decides, per row, whether the updates apply -- and it
+		 * reads state the updates change, so each row's decision must
+		 * observe the previous rows' updates.  For a unit body whose writes
+		 * are all plain SETs this folds into the items themselves: the
+		 * WHERE moves into each value as CASE WHEN <where> THEN <value>
+		 * ELSE <current> END, evaluated per row against accumulated state
+		 * by the accumulating evaluator.  A returning body cannot fold (the
+		 * WHERE decides its output rows), and other write kinds have no
+		 * per-item no-op form.
+		 */
+		if (shape->kind == CALL_BODY_UNIT && all_plain_sets &&
+			shape->lead_match != NULL &&
+			((CypherMatchClause *) shape->lead_match->detail)->where != NULL)
+		{
+			shape->fold_where = true;
+			shape->accumulate = true;
+		}
+		else
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("the MATCH of a CALL subquery body that returns rows cannot read a property the body writes"),
+					 errdetail("Each execution of the body would observe the previous executions\' updates."),
+					 parser_errposition(pstate, loc)));
+	}
 	if (callPropSetsIntersect(&set_writes, &create_reads))
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -2525,6 +2569,95 @@ callLeadMatchGateVar(CypherMatchClause *match, List *importlist)
 	}
 
 	return NULL;
+}
+
+/*
+ * callFoldGateApply
+ *		Move the copied lead MATCH's WHERE into every SET item of the chain
+ *		as a per-row gate: CASE WHEN <where> THEN <value> ELSE <current
+ *		value> END.  The accumulating evaluator then applies both the gate
+ *		and the value against each row's accumulated element state, which is
+ *		exactly the per-row decision the WHERE expresses.  (For "+=" items
+ *		the no-op branch merges an empty map.)
+ */
+static void
+callFoldGateApply(CypherClause *tail, CypherClause *match_clause)
+{
+	CypherMatchClause *m = (CypherMatchClause *) match_clause->detail;
+	Node	   *gate = m->where;
+	CypherClause *c;
+
+	Assert(gate != NULL);
+	m->where = NULL;
+
+	for (c = tail; c != NULL && c != match_clause;
+		 c = (CypherClause *) c->prev)
+	{
+		CypherSetClause *sc;
+		ListCell   *li;
+
+		if (cypherClauseTag(c) != T_CypherSetClause)
+			continue;
+		sc = (CypherSetClause *) c->detail;
+
+		foreach(li, sc->items)
+		{
+			CypherSetProp *sp = lfirst(li);
+			CaseExpr   *ce = makeNode(CaseExpr);
+			CaseWhen   *cw = makeNode(CaseWhen);
+
+			cw->expr = (Expr *) copyObject(gate);
+			cw->result = (Expr *) sp->expr;
+			cw->location = -1;
+
+			ce->casetype = InvalidOid;
+			ce->arg = NULL;
+			ce->args = list_make1(cw);
+			if (sp->add)
+			{
+				CypherMapExpr *emptymap = makeNode(CypherMapExpr);
+
+				emptymap->keyvals = NIL;
+				emptymap->location = -1;
+				ce->defresult = (Expr *) emptymap;
+			}
+			else
+				ce->defresult = (Expr *) copyObject(sp->prop);
+			ce->location = -1;
+
+			sp->expr = (Node *) ce;
+		}
+	}
+}
+
+/*
+ * callMatchIsVacuous
+ *		After the gate fold, a MATCH whose pattern only re-binds imported
+ *		variables (single node, no label, no properties) reads and produces
+ *		nothing: the chain can drop it entirely.
+ */
+static bool
+callMatchIsVacuous(CypherMatchClause *m, List *importlist)
+{
+	CypherPath *cpath;
+	CypherNode *cnode;
+
+	if (m->where != NULL || list_length(m->pattern) != 1)
+		return false;
+	if (callImportIsStar(importlist))
+		return false;			/* imported names unknown here */
+
+	cpath = linitial(m->pattern);
+	if (list_length(cpath->chain) != 1)
+		return false;
+
+	cnode = linitial(cpath->chain);
+	if (!IsA(cnode, CypherNode) ||
+		cnode->label != NULL || cnode->prop_map != NULL)
+		return false;
+
+	return callImportListContains(importlist,
+								  getCypherName(cnode->variable));
 }
 
 /*
@@ -2678,6 +2811,29 @@ transformCypherCallWriteBody(ParseState *pstate, CypherClause *clause)
 	while (head->prev != NULL)
 		head = (CypherClause *) head->prev;
 	head->prev = (Node *) bclause;
+
+	/*
+	 * Conditional read-modify-write: fold the MATCH's WHERE into the SET
+	 * items (see callFoldGateApply); a pattern that then only re-binds an
+	 * imported variable is dropped, leaving a plain accumulating body.
+	 */
+	if (shape.fold_where)
+	{
+		Assert(cypherClauseTag(head) == T_CypherMatchClause);
+		callFoldGateApply((CypherClause *) bodyCopy->last, head);
+
+		if (callMatchIsVacuous((CypherMatchClause *) head->detail,
+							   detail->importlist))
+		{
+			CypherClause *c = (CypherClause *) bodyCopy->last;
+
+			while ((CypherClause *) c->prev != head)
+				c = (CypherClause *) c->prev;
+			c->prev = (Node *) bclause;
+			head = c;
+			shape.lead_match = NULL;
+		}
+	}
 
 	if (shape.accumulate)
 		pstate->p_call_accumulate_sets = true;
