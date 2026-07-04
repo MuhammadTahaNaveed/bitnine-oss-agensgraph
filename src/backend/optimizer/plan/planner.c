@@ -1945,6 +1945,13 @@ grouping_planner(PlannerInfo *root, double tuple_fraction,
 		}
 		else if (parse->commandType == CMD_GRAPHWRITE)
 		{
+			/*
+			 * A GWROP_NONE graph-write Query is the row-discarding wrapper of
+			 * a terminal per-row CALL subquery; its writes live in its
+			 * subqueries, so there is no ModifyGraph to add here.
+			 */
+			if (parse->g_writeOp != GWROP_NONE)
+			{
 			List	   *withCheckOptionLists = NIL;
 
 			if (parse->withCheckOptions)
@@ -1960,12 +1967,14 @@ grouping_planner(PlannerInfo *root, double tuple_fraction,
 													parse->g_writeGateAttno,
 													parse->g_accumulate,
 													parse->g_accumOwnValues,
+													parse->g_iterStride,
 													parse->g_pattern,
 													parse->g_exprs,
 													parse->g_sets,
 													parse->g_resultRelations,
 													withCheckOptionLists,
 													assign_special_exec_param(root));
+			}
 		}
 
 		/*

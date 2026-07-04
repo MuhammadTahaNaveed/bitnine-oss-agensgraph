@@ -72,7 +72,12 @@ ExecMergeGraph(ModifyGraphState *mgstate, TupleTableSlot *slot)
 static bool
 isMatchedMergePattern(PlanState *planstate)
 {
-	Assert(IsA(planstate, NestLoopState));
+	/* gating quals may have wrapped the merge join in Result nodes */
+	while (IsA(planstate, ResultState) && outerPlanState(planstate) != NULL)
+		planstate = outerPlanState(planstate);
+
+	if (!IsA(planstate, NestLoopState))
+		elog(ERROR, "unexpected plan shape under a MERGE clause");
 
 	return ((NestLoopState *) planstate)->nl_MatchedOuter;
 }

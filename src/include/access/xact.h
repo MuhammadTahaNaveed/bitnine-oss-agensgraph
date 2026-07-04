@@ -453,6 +453,7 @@ extern void SetCurrentStatementStartTimestamp(void);
 extern int	GetCurrentTransactionNestLevel(void);
 extern bool TransactionIdIsCurrentTransactionId(TransactionId xid);
 extern void CommandCounterIncrement(void);
+extern void ForwardCommandCounterTo(CommandId target);
 extern void ForceSyncCommit(void);
 extern void StartTransactionCommand(void);
 extern void SaveTransactionCharacteristics(SavedTransactionCharacteristics *s);

@@ -4391,6 +4391,61 @@ create_customscan_plan(PlannerInfo *root, CustomPath *best_path,
  *
  *****************************************************************************/
 
+/*
+ * Does this plan subtree contain a CypherCall join?  Its inner side is a
+ * per-row CALL subquery body whose writes run once per pulled row, so the
+ * subtree must never be re-executed.
+ */
+static bool
+plan_has_cyphercall_join(Plan *plan)
+{
+	ListCell   *lc;
+
+	if (plan == NULL)
+		return false;
+
+	check_stack_depth();
+
+	switch (nodeTag(plan))
+	{
+		case T_NestLoop:
+			if (((NestLoop *) plan)->join.jointype == JOIN_CYPHER_CALL)
+				return true;
+			break;
+		case T_SubqueryScan:
+			if (plan_has_cyphercall_join(((SubqueryScan *) plan)->subplan))
+				return true;
+			break;
+		case T_ModifyGraph:
+			if (plan_has_cyphercall_join(((ModifyGraph *) plan)->subplan))
+				return true;
+			break;
+		case T_GraphVLE:
+			if (plan_has_cyphercall_join(((GraphVLE *) plan)->subplan))
+				return true;
+			break;
+		case T_Append:
+			foreach(lc, ((Append *) plan)->appendplans)
+			{
+				if (plan_has_cyphercall_join((Plan *) lfirst(lc)))
+					return true;
+			}
+			break;
+		case T_MergeAppend:
+			foreach(lc, ((MergeAppend *) plan)->mergeplans)
+			{
+				if (plan_has_cyphercall_join((Plan *) lfirst(lc)))
+					return true;
+			}
+			break;
+		default:
+			break;
+	}
+
+	return plan_has_cyphercall_join(plan->lefttree) ||
+		plan_has_cyphercall_join(plan->righttree);
+}
+
 static NestLoop *
 create_nestloop_plan(PlannerInfo *root,
 					 NestPath *best_path)
@@ -4430,6 +4485,26 @@ create_nestloop_plan(PlannerInfo *root,
 								   best_path->jpath.outerjoinpath->parent->relids);
 
 	inner_plan = create_plan_recurse(root, best_path->jpath.innerjoinpath, 0);
+
+	/*
+	 * An inner side containing a CypherCall join must not be re-executed:
+	 * every rescan would run the CALL subquery body's writes again.  Unless
+	 * something already buffers it, put a Material over it so the per-outer-
+	 * row rescans replay its (single) execution.  This join is never the
+	 * CypherCall join itself -- its own body may not be buffered -- and a
+	 * parameterized inner cannot contain one (the CALL query is never
+	 * parameterized; the pullup fence keeps it a whole subquery).
+	 */
+	if (best_path->jpath.jointype != JOIN_CYPHER_CALL &&
+		!IsA(inner_plan, Material) &&
+		bms_is_empty(PATH_REQ_OUTER(best_path->jpath.innerjoinpath)) &&
+		plan_has_cyphercall_join(inner_plan))
+	{
+		Plan	   *matplan = (Plan *) make_material(inner_plan);
+
+		copy_plan_costsize(matplan, inner_plan);
+		inner_plan = matplan;
+	}
 
 	/* Restore curOuterRels */
 	bms_free(root->curOuterRels);
@@ -4977,6 +5052,7 @@ create_modifygraph_plan(PlannerInfo *root, ModifyGraphPath *best_path)
 							subplan, best_path->nr_modify, best_path->detach,
 							best_path->eagerness, best_path->writeGateAttno,
 							best_path->accumulate, best_path->accumOwnValues,
+							best_path->iterStride,
 							best_path->pattern,
 							best_path->exprs, best_path->sets,
 							best_path->resultRelations,
@@ -7637,7 +7713,7 @@ ModifyGraph *
 make_modifygraph(PlannerInfo *root, GraphWriteOp operation, bool last,
 				 Plan *subplan, uint32 nr_modify, bool detach,
 				 bool eagerness, AttrNumber writeGateAttno, bool accumulate,
-				 bool accumOwnValues, List *pattern, List *exprs, List *sets,
+				 bool accumOwnValues, uint32 iterStride, List *pattern, List *exprs, List *sets,
 				 List *resultRelations, List *withCheckOptionLists,
 				 int epqParam)
 {
@@ -7652,6 +7728,7 @@ make_modifygraph(PlannerInfo *root, GraphWriteOp operation, bool last,
 	node->writeGateAttno = writeGateAttno;
 	node->accumulate = accumulate;
 	node->accumOwnValues = accumOwnValues;
+	node->iterStride = iterStride;
 	node->pattern = pattern;
 	node->exprs = exprs;
 	node->sets = sets;

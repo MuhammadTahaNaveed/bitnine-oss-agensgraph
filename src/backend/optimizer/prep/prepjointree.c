@@ -485,6 +485,7 @@ pull_up_sublinks_jointree_recurse(PlannerInfo *root, Node *jtnode,
 				break;
 			case JOIN_CYPHER_MERGE:
 			case JOIN_CYPHER_DELETE:
+			case JOIN_CYPHER_CALL:
 				/* do nothing */
 				break;
 			default:
@@ -962,6 +963,7 @@ pull_up_subqueries_recurse(PlannerInfo *root, Node *jtnode,
 			case JOIN_SEMI:
 			case JOIN_ANTI:
 			case JOIN_CYPHER_MERGE:
+			case JOIN_CYPHER_CALL:
 				j->larg = pull_up_subqueries_recurse(root, j->larg,
 													 j,
 													 NULL);
@@ -1569,6 +1571,37 @@ make_setop_translation_list(Query *query, int newvarno,
  * processed copy of that.)
  * lowest_outer_join is the lowest outer join above the subquery, or NULL.
  */
+bool
+jointree_has_cyphercall_join(Node *jtnode)
+{
+	if (jtnode == NULL)
+		return false;
+
+	if (IsA(jtnode, FromExpr))
+	{
+		ListCell   *l;
+
+		foreach(l, ((FromExpr *) jtnode)->fromlist)
+		{
+			if (jointree_has_cyphercall_join((Node *) lfirst(l)))
+				return true;
+		}
+		return false;
+	}
+
+	if (IsA(jtnode, JoinExpr))
+	{
+		JoinExpr   *j = (JoinExpr *) jtnode;
+
+		if (j->jointype == JOIN_CYPHER_CALL)
+			return true;
+		return jointree_has_cyphercall_join(j->larg) ||
+			jointree_has_cyphercall_join(j->rarg);
+	}
+
+	return false;
+}
+
 static bool
 is_simple_subquery(PlannerInfo *root, Query *subquery, RangeTblEntry *rte,
 				   JoinExpr *lowest_outer_join)
@@ -1582,6 +1615,17 @@ is_simple_subquery(PlannerInfo *root, Query *subquery, RangeTblEntry *rte,
 		elog(ERROR, "subquery is bogus");
 
 	if (subquery->commandType == CMD_GRAPHWRITE)
+		return false;
+
+	/*
+	 * A query holding a CypherCall join must stay a subquery: its inner side
+	 * is a writing CALL subquery body driven once per outer row, and
+	 * flattening the query into an upper one turns references to its outputs
+	 * (e.g. a following CALL body's whole-row seed) into placeholders
+	 * spanning the join, which the join-order machinery cannot place.
+	 */
+	if (subquery->hasGraphwriteClause &&
+		jointree_has_cyphercall_join((Node *) subquery->jointree))
 		return false;
 
 	/*
@@ -2998,6 +3042,7 @@ reduce_outer_joins_pass2(Node *jtnode,
 				break;
 			case JOIN_CYPHER_MERGE:
 			case JOIN_CYPHER_DELETE:
+			case JOIN_CYPHER_CALL:
 				/* do nothing */
 				break;
 			default:
@@ -3568,6 +3613,7 @@ remove_useless_results_recurse(PlannerInfo *root, Node *jtnode,
 			case JOIN_ANTI:
 			case JOIN_CYPHER_MERGE:
 			case JOIN_CYPHER_DELETE:
+			case JOIN_CYPHER_CALL:
 				/* We have no special smarts for these cases */
 				break;
 			default:

@@ -966,6 +966,7 @@ deconstruct_recurse(PlannerInfo *root, Node *jtnode,
 			case JOIN_ANTI:
 			case JOIN_CYPHER_MERGE:
 			case JOIN_CYPHER_DELETE:
+			case JOIN_CYPHER_CALL:
 				/* Make new join domain for my quals and the RHS */
 				child_domain = makeNode(JoinDomain);
 				child_domain->jd_relids = NULL; /* filled by recursion */

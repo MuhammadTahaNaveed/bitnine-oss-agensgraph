@@ -323,6 +323,14 @@ typedef enum JoinType
 	JOIN_CYPHER_DELETE,
 
 	/*
+	 * Like JOIN_LEFT, but planned as a nested loop whose inner side is
+	 * re-executed for every outer row: the read of a CALL subquery body
+	 * whose write clause it feeds must observe the writes of the previous
+	 * rows (see execModifyGraphReadSubplan).
+	 */
+	JOIN_CYPHER_CALL,
+
+	/*
 	 * We might need additional join types someday.
 	 */
 } JoinType;
@@ -349,12 +357,14 @@ typedef enum JoinType
 	   (1 << JOIN_ANTI) | \
 	   (1 << JOIN_CYPHER_MERGE) | \
 	   (1 << JOIN_CYPHER_DELETE) | \
+	   (1 << JOIN_CYPHER_CALL) | \
 	   (1 << JOIN_RIGHT_ANTI))) != 0)
 
 #define IS_GRAPH_JOIN(jointype) \
 	(((1 << (jointype)) & \
 	  ((1 << JOIN_CYPHER_MERGE) | \
-	   (1 << JOIN_CYPHER_DELETE))) != 0)
+	   (1 << JOIN_CYPHER_DELETE) | \
+	   (1 << JOIN_CYPHER_CALL))) != 0)
 
 /*
  * AggStrategy -

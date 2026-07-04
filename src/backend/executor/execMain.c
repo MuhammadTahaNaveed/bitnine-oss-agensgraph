@@ -377,13 +377,16 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 			elog(ERROR, "can't re-execute query flagged for single execution");
 
 		/*
-		 * A SELECT over graph-write clauses must apply the writes no matter
+		 * A query over graph-write clauses must apply the writes no matter
 		 * how (or whether) the reading side of the plan consumes them; run
-		 * the write barrier once, before the first pull.  See
-		 * ExecPredrainGraphWriters.
+		 * the write barrier once, before the first pull.  This covers both
+		 * a SELECT above writes and a graph-write statement whose top is not
+		 * itself a ModifyGraph (the row-discarding wrapper of a terminal
+		 * per-row CALL); an ordinary top ModifyGraph runs the same barrier
+		 * on its own first pull.  See ExecPredrainGraphWriters.
 		 */
 		if (!queryDesc->already_executed &&
-			operation == CMD_SELECT &&
+			(operation == CMD_SELECT || operation == CMD_GRAPHWRITE) &&
 			queryDesc->plannedstmt->hasGraphwriteClause)
 			ExecPredrainGraphWriters(queryDesc->planstate);
 

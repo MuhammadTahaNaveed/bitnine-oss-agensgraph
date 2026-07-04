@@ -1854,6 +1854,9 @@ ExplainNode(PlanState *planstate, List *ancestors,
 					case JOIN_CYPHER_MERGE:
 						jointype = "CypherMerge";
 						break;
+					case JOIN_CYPHER_CALL:
+						jointype = "CypherCall";
+						break;
 					case JOIN_CYPHER_DELETE:
 						jointype = "CypherDelete";
 						break;

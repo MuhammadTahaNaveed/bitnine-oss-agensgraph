@@ -248,6 +248,12 @@ struct ParseState
 	bool		p_valid_labels;
 	/* SET clauses being transformed belong to an accumulating CALL body */
 	bool		p_call_accumulate_sets;
+	/* per-row CALL: rtindex of the outer-row RTE at this level, for the
+	 * body's seed clause to reference (0 = none at this level) */
+	Index		p_call_outer_varno;
+	/* per-row CALL bodies of this statement (top-level ParseState only):
+	 * their body Queries, for the whole-statement label-disjointness check */
+	List	   *p_iterated_calls;
 	bool		p_is_fp_processed;
 	List	   *p_entity_info_list; /* final shape of named entities */
 	Node	   *p_vle_initial_vid;	/* initial vid for VLE */

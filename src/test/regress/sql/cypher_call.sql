@@ -739,34 +739,32 @@ CALL (a) { SET a.x = 1 };
 MATCH (w:WP) CALL (w) { SET w.x = 1 RETURN 1 AS w } RETURN w;
 MATCH (w:WP) CALL (w) { SET w.x = 1 RETURN 1 AS a, 2 AS a } RETURN a;
 
--- 7.8 unsupported shapes are rejected, never silently different --------------
+-- 7.8 shapes beyond the set-based tiers --------------------------------------
+--
+-- A body no set-based tier reproduces falls back to per-row execution
+-- (section 7.11).  What even the per-row tier cannot run correctly is
+-- rejected -- never silently different: a per-row body's writes surface
+-- between iterations, so a label it writes may not be read anywhere else in
+-- the statement, and a label it reads may not be written anywhere else.
 
--- reads that would observe the body's own writes
+-- the body writes a label the rest of the statement reads
 MATCH (w:WP) CALL (w) { MATCH (m:WP) CREATE (:WP {c: 1}) };
-MATCH (w:WP) CALL (w) { MATCH (m) CREATE (:WANY {c: 1}) };
 MATCH (w:WP) CALL (w) { MATCH (m:WP {age: 30}) SET m.age = 31 };
 MATCH (w:WP) CALL (w) { SET w.age = 1 CREATE (:WA {v: w.age}) };
--- per-row shapes not supported yet
-MATCH (w:WP) CALL (w) { UNWIND [1,2] AS i CREATE (:WU {v: i}) };
 MATCH (w:WP) CALL (w) { MATCH (a:WP) MATCH (b:WD) SET a.x = 1 };
 MATCH (w:WP) CALL (w) { OPTIONAL MATCH (m:WD) SET w.x = 1 };
 MATCH (w:WP) CALL (w) { SET w.x = 1 WITH w SET w.y = 2 };
-MATCH (w:WP) CALL (w) { CREATE (:WB) CALL (w) { SET w.q = 1 } };
 MATCH (w:WP) CALL (w) { MATCH (m:WD) SET m.x = 1 SET w.y = 1 MATCH (o:WP) SET o.z = 1 };
--- MERGE and DELETE stand alone
 MATCH (w:WP) CALL (w) { MERGE (:WM {k: 1}) SET w.x = 1 };
 MATCH (w:WP) CALL (w) { DELETE w SET w.x = 1 };
-MATCH (w:WP) CALL (w) { MATCH (d:WD) DELETE d RETURN 1 AS one } RETURN w.name;
--- modifiers, FINISH, UNION
-MATCH (w:WP) CALL (w) { MATCH (d:WD) LIMIT 1 SET d.x = 1 };
+MATCH (w:WP) CALL (w) { SET w.x = 1 RETURN DISTINCT 1 AS a } RETURN a;
+-- an unlabeled body read covers every label, so a write elsewhere collides
+UNWIND [1] AS i CALL (i) { MATCH (m) CREATE (:WANY {c: 1}) } WITH 1 AS one CREATE (:WOTHER);
+-- a nested writing CALL stays out of a writing body
+MATCH (w:WP) CALL (w) { CREATE (:WB) CALL (w) { SET w.q = 1 } };
+-- FINISH, UNION
 MATCH (w:WP) CALL (w) { SET w.x = 1 FINISH };
 MATCH (w:WP) CALL (w) { SET w.x = 1 RETURN 1 AS a UNION SET w.y = 2 RETURN 2 AS a } RETURN a;
--- the RETURN of a writing body keeps to plain items
-MATCH (w:WP) CALL (w) { SET w.x = 1 RETURN DISTINCT 1 AS a } RETURN a;
-MATCH (w:WP) CALL (w) { SET w.x = 1 RETURN count(*) AS a } RETURN a;
--- a mid-pipeline body whose pattern binds no named new variable has nothing
--- to gate its writes on
-MATCH (w:WP) CALL (w) { MATCH (w)-[:HASD]->(:WD) CREATE (:WC2) } RETURN w.name;
 -- a writing CALL is a clause, not an expression
 MATCH (w:WP) WHERE EXISTS { MATCH (m:WP) CALL (m) { SET m.e = 1 } RETURN m } RETURN w;
 SELECT * FROM (MATCH (w:WP) CALL (w) { SET w.f = 1 } RETURN w.name) t;
@@ -825,12 +823,17 @@ MATCH (o:WPO) CALL (o) { MATCH (o)-[e:WOWNS]->(d:WDG) SET o.z = d.name }
 RETURN o.z AS returned;
 MATCH (o:WPO) RETURN o.z AS stored;
 
--- reads the commutation checks cannot see are rejected
+-- reads the commutation checks cannot see fall back to per-row execution
+-- (a whole-element read: only the first iteration finds m without p)
 UNWIND [1,2] AS x CALL () { MATCH (m:WPO) WHERE NOT jsonb_exists(properties(m), 'p') SET m.p = 1 RETURN 1 AS hit } RETURN x;
-UNWIND [1,2] AS i CALL (*) { MATCH (m) CREATE (c:WXX) RETURN id(c) AS cid } RETURN i;
+-- (CALL (*): a star import never hides a read)
+UNWIND [1,2] AS i CALL (*) { MATCH (m:WPO) CREATE (c:WXX) } RETURN i;
+MATCH (x:WXX) RETURN count(*) AS made;
 MATCH (w:WP) CALL (w) { CREATE (c:WSTAR {v: 1}) RETURN * } RETURN w.name;
+-- (subquery expressions read what no walker can see)
 UNWIND [1,2] AS i CALL () { MATCH (n:WPO) WHERE NOT EXISTS { SELECT 1 FROM pg_class } CREATE (:WB2) } RETURN i;
 MATCH (w:WP) CALL (w) { MATCH (n:WPO) WHERE EXISTS((n)-[:WOWNS]->()) SET n.s = 1 };
+MATCH (n:WPO) RETURN n.s AS sublink_set;
 
 -- 7.9 prepared statements re-analyze cleanly ---------------------------------
 
@@ -869,10 +872,132 @@ $fn$ LANGUAGE plpgsql;
 SELECT call_write_loops('MATCH (w:WP) CALL (w) { SET w.lp = 1 } RETURN w.name') AS u1;
 SELECT call_write_loops('MATCH (o:WP2) CALL (o) { MATCH (o)-[e:HASD2]->(d:WD) SET d.lp = 1 } RETURN o.name') AS u2;
 SELECT call_write_loops('MATCH (w:WP) CALL (w) { CREATE (l:WLOG3 {of: w.name}) RETURN l.of AS made } RETURN made') AS r;
+-- and only a genuinely per-row body loops (section 7.11)
+SELECT call_write_loops('MATCH (w:WP) CALL (w) { UNWIND [1,2] AS i CREATE (:WLOG4 {v: i}) }') AS perrow;
 -- the writes the classifier probed above rolled back with the EXPLAIN
 MATCH (w:WP) WHERE w.lp IS NOT NULL RETURN count(*) AS rolled_back;
 
 DROP FUNCTION call_write_loops(text);
+
+-- 7.11 per-row bodies: the Apply tier ----------------------------------------
+--
+-- A body no set-based tier reproduces runs once per input row: it becomes a
+-- lateral subquery on the inner side of a CypherCall join (a parameterized
+-- nestloop, exactly MERGE's in-engine Apply loop), and every write clause
+-- advances its command-id window per iteration, so iteration k observes
+-- iterations < k precisely the way consecutive clauses observe each other --
+-- and never its own clause's writes.  This is openCypher's CALL semantics,
+-- at Neo4j's cost model for these shapes: one body execution per row.
+
+-- the canonical cascade: the body creates into the label its own MATCH
+-- reads; iteration 2 matches both the original node and iteration 1's
+CREATE (:PRX {gen: 0});
+UNWIND [1,2] AS i CALL (i) { MATCH (m:PRX) CREATE (:PRX {gen: i}) };
+MATCH (x:PRX) RETURN x.gen ORDER BY x.gen;
+
+-- ORDER BY / LIMIT inside the body re-execute per row over the grown label:
+-- each iteration extends from the current maximum
+CREATE (:PRG {v: 1});
+UNWIND [1,2,3] AS i CALL (i) { MATCH (g:PRG) WITH g ORDER BY g.v DESC LIMIT 1 CREATE (:PRG {v: g.v + 1}) };
+MATCH (g:PRG) RETURN g.v ORDER BY g.v;
+
+-- per-iteration aggregation observes the growth (the label must pre-exist:
+-- a MATCH on a label only a later clause of the same statement creates is
+-- folded to an empty scan, for a body exactly as inline)
+CREATE VLABEL prg2;
+UNWIND [1,2,3] AS i CALL (i) { MATCH (d:PRG2) WITH count(d) AS c UNWIND [0] AS z CREATE (:PRG2 {n: 100 + c}) };
+MATCH (g:PRG2) RETURN g.n ORDER BY g.n;
+
+-- returning conditional read-modify-write: each iteration's WHERE observes
+-- its predecessors' updates; the third finds the ceiling reached
+CREATE (:PRC {n: 0});
+UNWIND [1,2,3] AS i CALL (i) { MATCH (c:PRC) WHERE c.n < 2 SET c.n = c.n + 1 RETURN c.n AS cn } RETURN i, cn ORDER BY i;
+MATCH (c:PRC) RETURN c.n AS final_n;
+
+-- returning DELETE: iteration 2 no longer matches what iteration 1 deleted
+CREATE (:PRD {v: 1}), (:PRD {v: 2});
+UNWIND [1,2] AS i CALL (i) { MATCH (d:PRD) DELETE d RETURN 1 AS one } RETURN i, one ORDER BY i;
+MATCH (d:PRD) RETURN count(*) AS all_gone;
+
+-- MERGE observes the previous iterations' merges
+UNWIND [1,1,2] AS k CALL (k) { MERGE (m:PRM {k: k}) SET m.hits = coalesce(m.hits, 0) + 1 };
+MATCH (m:PRM) RETURN m.k, m.hits ORDER BY m.k;
+
+-- imported elements stay bound inside the body: the CREATE reuses them
+CREATE (:PRP {name: 'a'}), (:PRP {name: 'b'});
+MATCH (p:PRP) CALL (p) { UNWIND [1,2] AS j CREATE (p)-[:PRHAS {j: j}]->(:PRI {owner: p.name}) };
+MATCH (p:PRP)-[r:PRHAS]->(i:PRI) RETURN p.name, r.j, i.owner ORDER BY p.name, r.j;
+
+-- multi-clause pipelines: WITH, WHERE and a per-iteration RETURN stream
+MATCH (p:PRP) CALL (p) { MATCH (p)-[r:PRHAS]->(i:PRI) WITH i, r.j AS j WHERE j = 1 SET i.first = true RETURN j } RETURN count(*) AS firsts;
+
+-- a unit pattern body that binds no named new variable (nothing to gate
+-- set-based writes on) runs per row
+MATCH (p:PRP) CALL (p) { MATCH (p)-[:PRHAS]->(:PRI) CREATE (:PR5) };
+MATCH (c:PR5) RETURN count(*) AS made5;
+
+-- a unit body with zero matches passes its input row through; a NULL import
+-- still iterates
+CREATE VLABEL przed;
+UNWIND [1,2] AS i CALL (i) { MATCH (z:przed) WITH z AS y DELETE y } RETURN i ORDER BY i;
+OPTIONAL MATCH (z:przed) CALL (z) { UNWIND [1] AS j CREATE (:PRN {was_null: z IS NULL}) };
+MATCH (n:PRN) RETURN n.was_null;
+
+-- a body variable may share an outer variable's name without capture
+MATCH (q:PRP) WITH q, 1 AS marker CALL (marker) { MATCH (q:PRI) WITH q AS qi, marker AS m2 UNWIND [1] AS u SET qi.m = m2 } RETURN count(*) AS input_rows;
+MATCH (i:PRI) WHERE i.m = 1 RETURN count(*) AS marked;
+
+-- a terminal per-row CALL ends the statement like a terminal write
+UNWIND [1,2] AS i CALL (i) { UNWIND [1,2] AS j CREATE (:PRT {v: i*10 + j}) };
+MATCH (t:PRT) RETURN t.v ORDER BY t.v;
+
+-- per-row CALLs chain
+UNWIND [1,2] AS i CALL (i) { UNWIND [1] AS a CREATE (:PR1 {v: i}) } CALL (i) { UNWIND [1] AS b CREATE (:PR2 {v: i * 100}) };
+MATCH (a:PR1) MATCH (b:PR2) WHERE b.v = a.v * 100 RETURN a.v, b.v ORDER BY a.v;
+
+-- a read CALL's output drives a per-row CALL
+CALL { MATCH (p:PRP) RETURN p.name AS pn } CALL (pn) { UNWIND [1] AS u CREATE (:PR3 {of: pn}) };
+MATCH (c:PR3) RETURN c.of ORDER BY c.of;
+
+-- a nested read CALL runs inside a per-row body
+MATCH (p:PRP) CALL (p) { UNWIND [1] AS u CALL (p) { MATCH (i:PRI {owner: p.name}) RETURN count(i) AS ni } CREATE (:PR4 {n: ni}) };
+MATCH (c:PR4) RETURN c.n ORDER BY c.n;
+
+-- the Apply shape: a CypherCall join re-executes the body subquery per row,
+-- with no cache in between
+EXPLAIN (COSTS OFF) UNWIND [1,2] AS i CALL (i) { UNWIND [1] AS j CREATE (:PRT {v: i}) };
+
+-- per-row bodies re-analyze cleanly behind prepared statements
+PREPARE prcall AS UNWIND [1] AS i CALL (i) { UNWIND [1,2] AS j CREATE (:PRPP {v: j}) };
+EXECUTE prcall;
+EXECUTE prcall;
+MATCH (p:PRPP) RETURN count(*) AS four;
+DEALLOCATE prcall;
+
+-- a WHERE after the CALL filters its output only; the body ran per input row
+UNWIND [1,2] AS i CALL (i) { UNWIND [1] AS j CREATE (:PRW1 {v: i}) RETURN 1 AS one } WITH i, one WHERE i = 1 RETURN i, one;
+MATCH (n:PRW1) RETURN n.v ORDER BY n.v;
+
+-- caches on parameter-free branches inside the body recompute per iteration
+-- (iteration 2's b-scan must see iteration 1's create: 1 + 1x1 + 2x2 = 6)
+CREATE (:PRX2 {gen: 0});
+UNWIND [1,2] AS i CALL (i) { MATCH (a:PRX2) MATCH (b:PRX2) CREATE (:PRX2 {gen: i}) };
+MATCH (x:PRX2) RETURN count(*) AS six;
+
+-- a trailing MATCH may re-read the CALL's buffered result, never re-run it
+CREATE (:PRS {v: 42});
+UNWIND [1,2] AS i CALL (i) { UNWIND [1] AS j CREATE (:PRT2 {v: i}) RETURN 1 AS one } WITH i, one MATCH (s:PRS) RETURN count(*) AS cnt;
+MATCH (t:PRT2) RETURN t.v ORDER BY t.v;
+
+-- what the per-row tier refuses: a body whose writes the statement's other
+-- clauses would observe part-way through -- growing inputs, half-stale reads
+MATCH (x:PRX) CALL (x) { UNWIND [1] AS j CREATE (:PRX {gen: 9}) };
+UNWIND [1] AS i CALL (i) { UNWIND [1] AS j CREATE (:PRX {gen: 9}) } WITH 1 AS one MATCH (x:PRX) RETURN count(*);
+UNWIND [1] AS i CALL (i) { MATCH (x:PRX) UNWIND [1] AS j CREATE (:PRQ {v: 1}) } WITH 1 AS one CREATE (:PRX {gen: 9});
+-- and the result of a returning per-row CALL cannot be re-read by a plain
+-- nestloop above it (the plan would run the writes twice) -- buffered plans
+-- (Sort, Material, aggregation) read it exactly once
+UNWIND [1,2] AS i CALL (i) { MATCH (d:PRG2) SET d.q = i RETURN 1 AS one } RETURN i, one ORDER BY i;
 
 -- cleanup
 DROP GRAPH cypher_call CASCADE;

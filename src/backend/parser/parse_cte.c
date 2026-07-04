@@ -1083,6 +1083,7 @@ checkWellFormedRecursionWalker(Node *node, CteState *cstate)
 			case JOIN_LEFT:
 			case JOIN_CYPHER_MERGE:
 			case JOIN_CYPHER_DELETE:
+			case JOIN_CYPHER_CALL:
 				checkWellFormedRecursionWalker(j->larg, cstate);
 				if (save_context == RECURSION_OK)
 					cstate->context = RECURSION_OUTERJOIN;

@@ -285,6 +285,10 @@ typedef struct Query
 	bool		g_accumulate pg_node_attr(query_jumble_ignore);
 	/* surface each row's own accumulated value (a returning CALL body) */
 	bool		g_accumOwnValues pg_node_attr(query_jumble_ignore);
+	/* per-row CALL body: command-id windows one iteration spans (0 = not
+	 * iterated); the executor advances modify_cid by this many windows on
+	 * every rescan so each iteration observes its predecessors' writes */
+	uint32		g_iterStride pg_node_attr(query_jumble_ignore);
 } Query;
 
 
@@ -4639,6 +4643,21 @@ typedef struct CypherCallBoundary
 	Query	   *wrapper;		/* out: the hiding wrapper the transform built */
 	List	   *outer_names;	/* out: original names of the outer columns */
 } CypherCallBoundary;
+
+/*
+ * The bottom clause of a per-row CALL subquery body: one row carrying a
+ * reference to the outer query's input row.  The reference becomes a nestloop
+ * parameter of the CypherCall join, whose per-row change defeats any result
+ * caching inside the body plan, so the whole body re-executes for every input
+ * row.  A synthetic clause the grammar never produces; see
+ * transformCypherCallPerRow().
+ */
+typedef struct CypherCallSeed
+{
+	NodeTag		type;
+	List	   *importlist;		/* as in CypherCallClause */
+	int			location;		/* location of the owning CALL */
+} CypherCallSeed;
 
 typedef enum CPathKind
 {

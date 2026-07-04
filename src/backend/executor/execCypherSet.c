@@ -753,5 +753,18 @@ updateElementTable(ModifyGraphState *mgstate, Datum gid, Datum newelem)
 							GraphidGetLocid(entry->key))));
 	}
 
-	entry->elem = datumCopy(newelem, false, -1);
+	/*
+	 * The copy must outlive per-tuple memory (the clause-end flush reads
+	 * it); in a per-row CALL body it goes to the iteration context so a
+	 * long input does not accumulate every iteration's copies.
+	 */
+	if (mgstate->iterCxt != NULL)
+	{
+		MemoryContext oldcxt = MemoryContextSwitchTo(mgstate->iterCxt);
+
+		entry->elem = datumCopy(newelem, false, -1);
+		MemoryContextSwitchTo(oldcxt);
+	}
+	else
+		entry->elem = datumCopy(newelem, false, -1);
 }

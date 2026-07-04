@@ -3704,6 +3704,7 @@ transformCypherStmt(ParseState *pstate, CypherStmt *stmt)
 			case T_CypherUnwindClause:
 			case T_CypherForClause:
 			case T_CypherCallClause:
+			case T_CypherCallSeed:
 			case T_CypherModifier:
 			case T_CypherFilterClause:
 				/* do nothing. */
@@ -3730,7 +3731,19 @@ transformCypherStmt(ParseState *pstate, CypherStmt *stmt)
 		clause = (CypherClause *) clause->prev;
 	}
 
-	return transformStmt(pstate, stmt->last);
+	{
+		Query	   *qry = transformStmt(pstate, stmt->last);
+
+		/*
+		 * A per-row CALL subquery body interleaves its writes with the
+		 * statement's other scans; verify the statement keeps them apart
+		 * (see callValidateIteratedBodies).
+		 */
+		if (pstate->p_iterated_calls != NIL)
+			callValidateIteratedBodies(pstate, qry);
+
+		return qry;
+	}
 }
 
 static Query *
@@ -3772,6 +3785,9 @@ transformCypherClause(ParseState *pstate, CypherClause *clause)
 			break;
 		case T_CypherCallBoundary:
 			qry = transformCypherCallBoundary(pstate, clause);
+			break;
+		case T_CypherCallSeed:
+			qry = transformCypherCallSeed(pstate, clause);
 			break;
 		case T_CypherModifier:
 			qry = transformCypherModifier(pstate, clause);

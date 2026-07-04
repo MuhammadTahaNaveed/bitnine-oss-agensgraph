@@ -2128,6 +2128,9 @@ typedef struct NestLoopState
 	JoinState	js;				/* its first field is NodeTag */
 	bool		nl_NeedNewOuter;
 	bool		nl_MatchedOuter;
+	bool		nl_CypherCallRan;	/* a CypherCall join consumed input since
+									 * its last rescan (re-running it would
+									 * repeat the CALL body's writes) */
 	TupleTableSlot *nl_NullInnerTupleSlot;
 } NestLoopState;
 
@@ -2882,6 +2885,9 @@ typedef struct ModifyGraphState
 	bool		done;
 	bool		child_done;
 	bool		predrained;		/* nested eager writers already drained? */
+	bool		iter_fresh;		/* reset for a CALL body iteration, not yet
+								 * rescanned (see ExecReScanModifyGraph) */
+	bool		iter_wrote;		/* wrote in the current iteration's window */
 	bool		eagerness;
 	CommandId	modify_cid;
 	PlanState  *subplan;
@@ -2896,6 +2902,8 @@ typedef struct ModifyGraphState
 	bool	   *update_cols;	/* array of columns to update */
 	HTAB	   *elemTable;
 	Tuplestorestate *tuplestorestate;
+	MemoryContext iterCxt;		/* per-CALL-iteration allocations (NULL when
+								 * not a per-row CALL body clause) */
 	TupleTableSlot *(*execProc) (struct ModifyGraphState *pstate,
 								 TupleTableSlot *slot);
 	EPQState	mt_epqstate;	/* for evaluating EvalPlanQual rechecks */

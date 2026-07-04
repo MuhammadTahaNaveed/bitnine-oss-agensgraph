@@ -2358,6 +2358,7 @@ eqjoinsel(PG_FUNCTION_ARGS)
 		case JOIN_FULL:
 		case JOIN_CYPHER_MERGE:
 		case JOIN_CYPHER_DELETE:
+		case JOIN_CYPHER_CALL:
 			selec = selec_inner;
 			break;
 		case JOIN_SEMI:

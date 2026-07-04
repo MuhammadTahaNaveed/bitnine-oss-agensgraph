@@ -12563,6 +12563,11 @@ get_from_clause_item(Node *jtnode, Query *query, deparse_context *context)
 									 PRETTYINDENT_STD,
 									 PRETTYINDENT_JOIN);
 				break;
+			case JOIN_CYPHER_CALL:
+				appendContextKeyword(context, " CYPHER CALL JOIN ",
+									 -PRETTYINDENT_STD,
+									 PRETTYINDENT_STD, PRETTYINDENT_JOIN);
+				break;
 			case JOIN_CYPHER_MERGE:
 				appendContextKeyword(context, " CYPHER MERGE JOIN ",
 									 -PRETTYINDENT_STD,

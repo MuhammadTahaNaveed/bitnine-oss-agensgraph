@@ -1138,6 +1138,33 @@ CommandCounterIncrement(void)
 }
 
 /*
+ * ForwardCommandCounterTo
+ *
+ * Advance the command counter to at least `target` in one step.  The ids in
+ * between were consumed as tuple stamps by a caller that manages its own
+ * command-id windows (a per-row CALL subquery body writes at virtual command
+ * ids above the counter, one window per iteration); stepping over them one
+ * CommandCounterIncrement at a time would cost O(ids skipped) at statement
+ * end.  Jump to just below the target and take one real increment, so the
+ * invalidation and snapshot bookkeeping of an ordinary increment still runs.
+ */
+void
+ForwardCommandCounterTo(CommandId target)
+{
+	if (target == InvalidCommandId)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("cannot have more than 2^32-2 commands in a transaction")));
+
+	if (currentCommandId >= target)
+		return;
+
+	currentCommandId = target - 1;
+	currentCommandIdUsed = true;
+	CommandCounterIncrement();
+}
+
+/*
  * ForceSyncCommit
  *
  * Interface routine to allow commands to force a synchronous commit of the

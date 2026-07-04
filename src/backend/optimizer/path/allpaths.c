@@ -39,6 +39,7 @@
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/plancat.h"
+#include "optimizer/prep.h"
 #include "optimizer/planner.h"
 #include "optimizer/tlist.h"
 #include "parser/parse_clause.h"
@@ -3595,6 +3596,17 @@ subquery_is_pushdown_safe(Query *subquery, Query *topquery,
 
 	/* Check point 7 */
 	if (subquery->commandType == CMD_GRAPHWRITE)
+		return false;
+
+	/*
+	 * Check point 7 applies equally to a query holding a CypherCall join: a
+	 * pushed-down qual referencing only its input columns would land below
+	 * the join, filtering the rows that drive the per-row CALL subquery body
+	 * and silently skipping its writes.  The body must run for every input
+	 * row; a qual above the query filters only the rows that flow on.
+	 */
+	if (subquery->hasGraphwriteClause &&
+		jointree_has_cyphercall_join((Node *) subquery->jointree))
 		return false;
 
 	/* Check point 1 */

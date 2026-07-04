@@ -97,7 +97,19 @@ ExecInitModifyGraph(ModifyGraph *mgplan, EState *estate, int eflags)
 	mgstate->done = false;
 	mgstate->child_done = false;
 	mgstate->predrained = false;
+	mgstate->iter_fresh = false;
+	mgstate->iter_wrote = false;
 	mgstate->eagerness = mgplan->eagerness;
+
+	/*
+	 * A per-row CALL body clause accumulates long-lived per-iteration
+	 * allocations (the modified-element table's element copies); give them
+	 * a context the iteration reset can reclaim wholesale.
+	 */
+	mgstate->iterCxt = (mgplan->iterStride > 0) ?
+		AllocSetContextCreate(CurrentMemoryContext,
+							  "ModifyGraph iteration context",
+							  ALLOCSET_SMALL_SIZES) : NULL;
 	mgstate->modify_cid = GetCurrentCommandId(false) +
 		(mgplan->nr_modify * MODIFY_CID_MAX);
 
@@ -196,7 +208,13 @@ ExecInitModifyGraph(ModifyGraph *mgplan, EState *estate, int eflags)
 		/* We will not use eager action */
 		mgstate->elemTable = NULL;
 	}
-	mgstate->tuplestorestate = tuplestore_begin_heap(false, false, eager_mem);
+	/*
+	 * A per-row CALL body clause may be asked to replay its buffered output
+	 * within one iteration (see ExecReScanModifyGraph), which needs a
+	 * rewindable store.
+	 */
+	mgstate->tuplestorestate = tuplestore_begin_heap(mgplan->iterStride > 0,
+													 false, eager_mem);
 
 	switch (mgplan->operation)
 	{
@@ -498,6 +516,7 @@ execModifyGraphChild(ModifyGraphState *mgstate)
 			}
 		}
 
+		mgstate->iter_wrote = true;
 		slot = mgstate->execProc(mgstate, slot);
 
 		Assert(mgstate->eagerness);
@@ -554,6 +573,20 @@ predrainEagerWriterWalker(PlanState *node, void *context)
 		ModifyGraphState *child = (ModifyGraphState *) node;
 
 		/*
+		 * This walk drains the clause directly, without the ExecProcNode
+		 * wrapper that fires a pending (changed-parameter) rescan first.
+		 * Fire it here instead: draining a per-row CALL body clause still
+		 * carrying its iteration mark would run it in the previous
+		 * iteration's state, and its later deferred reset would then run it
+		 * again -- writing twice.  Only the clause itself needs this; the
+		 * nodes below it are pulled through ExecProcNode during the drain,
+		 * which fires their pending rescans in pull order, after the plan
+		 * above them has set their parameters.
+		 */
+		if (child->ps.chgParam != NULL)
+			ExecReScan((PlanState *) child);
+
+		/*
 		 * A ModifyGraphState keeps its input in its own "subplan" field rather
 		 * than as an ordinary left child, so planstate_tree_walker() does not
 		 * descend into it.  Recurse explicitly, and do so before draining this
@@ -586,6 +619,19 @@ predrainEagerWriterWalker(PlanState *node, void *context)
 		 * nested under a [*] expansion would escape the barrier.
 		 */
 		predrainEagerWriters(((GraphVLEState *) node)->subplan);
+		return false;
+	}
+
+	if (IsA(node, NestLoopState) &&
+		((NestLoopState *) node)->js.jointype == JOIN_CYPHER_CALL)
+	{
+		/*
+		 * The inner side is a per-row CALL subquery body: the join drives it
+		 * once per input row with fresh parameters, so its write clauses must
+		 * not run early (their parameters are not even set yet).  Keep
+		 * walking the input side only.
+		 */
+		predrainEagerWriters(outerPlanState(node));
 		return false;
 	}
 
@@ -704,6 +750,7 @@ ExecModifyGraph(PlanState *pstate)
 					}
 				}
 
+				mgstate->iter_wrote = true;
 				slot = mgstate->execProc(mgstate, slot);
 
 				/*
@@ -774,6 +821,180 @@ ExecModifyGraph(PlanState *pstate)
 	return NULL;
 }
 
+/*
+ * ExecModifyGraphBeginIteration
+ *
+ * Reset a write clause for the next iteration of the per-row CALL subquery
+ * body it belongs to.  The CypherCall join announces each iteration
+ * explicitly (ExecCypherCallBeginIteration) before it rescans the body -- a
+ * plan-shape-independent signal, where inferring the boundary from changed
+ * parameters would fail whenever the planner has elided the body's outer
+ * references (e.g. a body whose reads collapsed to a constant-false scan).
+ *
+ * Cross-iteration visibility is what distinguishes this from an ordinary
+ * rescan: each iteration must observe every previous iteration's writes and
+ * none of its own clause's.  Writes are stamped with virtual command ids
+ * inside this clause's window (modify_cid), so advancing the window by the
+ * body's full span -- the iteration stride computed at analysis time --
+ * re-creates the ordinary consecutive-clause arrangement between
+ * iterations.  The real command counter only catches up once, at
+ * ExecEndModifyGraph().
+ */
+static void
+ExecModifyGraphBeginIteration(ModifyGraphState *mgstate)
+{
+	ModifyGraph *plan = (ModifyGraph *) mgstate->ps.plan;
+
+	Assert(plan->iterStride > 0);
+
+	/*
+	 * A window is only consumed once something was stamped inside it: an
+	 * iteration in which this clause wrote nothing left the window clean,
+	 * so the next iteration's reads need no higher vantage point.  This
+	 * keeps the command-id space consumed proportional to actual writes,
+	 * not to input rows.
+	 */
+	if (mgstate->iter_wrote)
+	{
+		/* the next window must fit under the command-id ceiling */
+		if (mgstate->modify_cid >
+			PG_UINT32_MAX - (plan->iterStride + 1) * MODIFY_CID_MAX)
+			ereport(ERROR,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("too many executions of a CALL subquery body in one statement")));
+		mgstate->modify_cid += plan->iterStride * MODIFY_CID_MAX;
+		mgstate->iter_wrote = false;
+	}
+
+	mgstate->done = false;
+	mgstate->child_done = false;
+	mgstate->predrained = false;
+	mgstate->iter_fresh = true;
+	tuplestore_clear(mgstate->tuplestorestate);
+
+	/*
+	 * Multiple-update/delete detection restarts with the iteration.  Empty
+	 * the table in place (re-creating it here would put it in whatever
+	 * short-lived context the call runs in), then reset the iteration
+	 * context that owns its long-lived element copies -- without the reset
+	 * a long input grows the per-query memory by every iteration's copies.
+	 * The datums the reset does not cover live in per-tuple memory the
+	 * expression-context resets already reclaim.
+	 */
+	if (mgstate->elemTable != NULL)
+	{
+		HASH_SEQ_STATUS seq;
+		ModifiedElemEntry *entry;
+
+		hash_seq_init(&seq, mgstate->elemTable);
+		while ((entry = (ModifiedElemEntry *) hash_seq_search(&seq)) != NULL)
+		{
+			if (hash_search(mgstate->elemTable, &entry->key,
+							HASH_REMOVE, NULL) == NULL)
+				elog(ERROR, "modified object table corrupted");
+		}
+	}
+
+	if (mgstate->iterCxt != NULL)
+		MemoryContextReset(mgstate->iterCxt);
+}
+
+static bool
+callBeginIterationWalker(PlanState *node, void *context)
+{
+	if (node == NULL)
+		return false;
+
+	/*
+	 * Mark every node of the body as having a changed parameter, whether or
+	 * not its own subtree references one.  The nestloop parameters only
+	 * invalidate plan nodes whose subtrees use them; a caching node on a
+	 * parameter-free branch (a Materialize or Hash over a plain label scan
+	 * on the inner side of a join inside the body) would otherwise just
+	 * rewind at the iteration boundary and replay the previous iteration's
+	 * tuples, hiding that iteration's writes.  The mark uses a parameter
+	 * number no plan node reads (one past the last real one), so it only
+	 * trips the "something changed, recompute" checks; the first rescan of
+	 * each node consumes it.
+	 */
+	node->chgParam = bms_add_member(node->chgParam, *(int *) context);
+
+	if (IsA(node, ModifyGraphState))
+	{
+		ModifyGraphState *mgstate = (ModifyGraphState *) node;
+
+		ExecModifyGraphBeginIteration(mgstate);
+		/* the input lives in a private field the generic walker misses */
+		return callBeginIterationWalker(mgstate->subplan, context);
+	}
+
+	if (IsA(node, GraphVLEState))
+		return callBeginIterationWalker(((GraphVLEState *) node)->subplan,
+										context);
+
+	return planstate_tree_walker(node, callBeginIterationWalker, context);
+}
+
+/*
+ * ExecCypherCallBeginIteration
+ *
+ * Called by the CypherCall nestloop for every input row, before it rescans
+ * the body: reset every write clause of the body for the new iteration.  (A
+ * nested per-row CALL cannot occur inside the body -- the parser rejects it
+ * -- so every ModifyGraph found belongs to this body.)
+ */
+void
+ExecCypherCallBeginIteration(PlanState *body)
+{
+	int			iterparam;
+
+	check_stack_depth();
+
+	iterparam = list_length(body->state->es_plannedstmt->paramExecTypes);
+	(void) callBeginIterationWalker(body, &iterparam);
+}
+
+/*
+ * ExecReScanModifyGraph
+ *
+ * Rescan a write clause of a per-row CALL subquery body (the only
+ * graph-writing plans a rescan reaches).  At an iteration boundary the
+ * clause was just reset by ExecCypherCallBeginIteration; all that remains is
+ * to pass the changed parameters down its input.  Any other rescan is a join
+ * inside the body re-reading its input side within one iteration: the
+ * clause's writes have happened and its output is buffered (every
+ * non-terminal body write is eager), so replay the buffer exactly as a
+ * Material node would.
+ */
+void
+ExecReScanModifyGraph(ModifyGraphState *mgstate)
+{
+	ModifyGraph *plan = (ModifyGraph *) mgstate->ps.plan;
+
+	if (plan->iterStride == 0)
+		elog(ERROR, "cannot re-scan a graph-writing plan outside a CALL subquery body");
+
+	if (mgstate->iter_fresh)
+	{
+		mgstate->iter_fresh = false;
+
+		/*
+		 * The input is held in a private "subplan" field, so
+		 * changed-parameter signaling is on us (as in
+		 * ExecReScanSubqueryScan).
+		 */
+		if (mgstate->ps.chgParam != NULL)
+			UpdateChangedParamSet(mgstate->subplan, mgstate->ps.chgParam);
+		if (mgstate->subplan->chgParam == NULL)
+			ExecReScan(mgstate->subplan);
+		return;
+	}
+
+	if (!mgstate->eagerness)
+		elog(ERROR, "cannot replay a streaming graph-writing plan");
+	tuplestore_rescan(mgstate->tuplestorestate);
+}
+
 void
 ExecEndModifyGraph(ModifyGraphState *mgstate)
 {
@@ -807,10 +1028,8 @@ ExecEndModifyGraph(ModifyGraphState *mgstate)
 	 * made by this ModifyGraph plan in the next command.
 	 */
 	used_cid = mgstate->modify_cid + MODIFY_CID_MAX;
-	while (used_cid > GetCurrentCommandId(true))
-	{
-		CommandCounterIncrement();
-	}
+	if (used_cid > GetCurrentCommandId(true))
+		ForwardCommandCounterTo(used_cid);
 }
 
 static void
@@ -1079,8 +1298,17 @@ reflectModifiedProp(ModifyGraphState *mgstate)
 			else
 				elog(ERROR, "unexpected graph type %d", type);
 
-			newelem = makeModifiedElem(entry->elem, type, gid, property,
-									   PointerGetDatum(ctid));
+			if (mgstate->iterCxt != NULL)
+			{
+				MemoryContext oldcxt = MemoryContextSwitchTo(mgstate->iterCxt);
+
+				newelem = makeModifiedElem(entry->elem, type, gid, property,
+										   PointerGetDatum(ctid));
+				MemoryContextSwitchTo(oldcxt);
+			}
+			else
+				newelem = makeModifiedElem(entry->elem, type, gid, property,
+										   PointerGetDatum(ctid));
 
 			pfree(DatumGetPointer(entry->elem));
 			entry->elem = newelem;

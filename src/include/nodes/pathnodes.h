@@ -2442,6 +2442,8 @@ typedef struct ModifyGraphPath
 	bool		accumulate;
 	/* surface each row's own accumulated value (a returning CALL body) */
 	bool		accumOwnValues;
+	/* per-row CALL body: windows modify_cid advances by per rescan */
+	uint32		iterStride;
 } ModifyGraphPath;
 
 typedef struct ShortestpathPath

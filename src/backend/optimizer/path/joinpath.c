@@ -408,7 +408,7 @@ add_paths_for_cdelete(PlannerInfo *root, RelOptInfo *joinrel,
 	extra.param_source_rels = NULL;
 	extra.inner_unique = innerrel_is_unique(root, joinrel->relids,
 											outerrel->relids, innerrel,
-											JOIN_CYPHER_DELETE, restrictlist,
+											type, restrictlist,
 											false);
 
 	foreach(lc, root->join_info_list)

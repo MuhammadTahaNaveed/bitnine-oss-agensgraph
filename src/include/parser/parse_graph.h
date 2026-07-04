@@ -50,6 +50,9 @@ extern Query *transformCypherForClause(ParseState *pstate,
 									   CypherClause *clause);
 extern Query *transformCypherCallBoundary(ParseState *pstate,
 										  CypherClause *clause);
+extern Query *transformCypherCallSeed(ParseState *pstate,
+									  CypherClause *clause);
+extern void callValidateIteratedBodies(ParseState *pstate, Query *qry);
 extern Query *transformCypherCallClause(ParseState *pstate,
 										CypherClause *clause);
 extern Query *transformCypherCountClause(ParseState *pstate,

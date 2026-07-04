@@ -22,6 +22,7 @@
 #include "postgres.h"
 
 #include "executor/execdebug.h"
+#include "executor/nodeModifyGraph.h"
 #include "executor/nodeNestloop.h"
 #include "miscadmin.h"
 
@@ -148,6 +149,11 @@ ExecNestLoop(PlanState *pstate)
 			 * now rescan the inner plan
 			 */
 			ENL1_printf("rescanning inner plan");
+			if (node->js.jointype == JOIN_CYPHER_CALL)
+			{
+				node->nl_CypherCallRan = true;
+				ExecCypherCallBeginIteration(innerPlan);
+			}
 			ExecReScan(innerPlan);
 		}
 
@@ -169,6 +175,7 @@ ExecNestLoop(PlanState *pstate)
 				(node->js.jointype == JOIN_LEFT ||
 				 node->js.jointype == JOIN_CYPHER_MERGE ||
 				 node->js.jointype == JOIN_CYPHER_DELETE ||
+				 node->js.jointype == JOIN_CYPHER_CALL ||
 				 node->js.jointype == JOIN_ANTI))
 			{
 				/*
@@ -333,6 +340,7 @@ ExecInitNestLoop(NestLoop *node, EState *estate, int eflags)
 		case JOIN_ANTI:
 		case JOIN_CYPHER_MERGE:
 		case JOIN_CYPHER_DELETE:
+		case JOIN_CYPHER_CALL:
 			nlstate->nl_NullInnerTupleSlot =
 				ExecInitNullTupleSlot(estate,
 									  ExecGetResultType(innerPlanState(nlstate)),
@@ -385,6 +393,20 @@ void
 ExecReScanNestLoop(NestLoopState *node)
 {
 	PlanState  *outerPlan = outerPlanState(node);
+
+	/*
+	 * Re-executing a CypherCall join that has consumed input would run those
+	 * iterations of its CALL subquery body -- and the body's writes -- a
+	 * second time.  The planner buffers this join behind a Material when an
+	 * upper join would re-read it (create_nestloop_plan), so this is a
+	 * should-not-happen backstop: fail loudly rather than write twice.  A
+	 * rescan before anything ran (an upper nestloop resets its inner before
+	 * first use) is harmless and proceeds.
+	 */
+	if (node->js.jointype == JOIN_CYPHER_CALL && node->nl_CypherCallRan)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("the result of a CALL subquery that writes cannot be re-read")));
 
 	/*
 	 * If outerPlan->chgParam is not null then plan will be automatically

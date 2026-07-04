@@ -351,6 +351,9 @@ static bool callImportIsStar(List *importlist);
 /* transform */
 typedef Query *(*TransformMethod) (ParseState *pstate, Node *parseTree);
 static ParseNamespaceItem *transformClause(ParseState *pstate, Node *clause);
+static ParseNamespaceItem *makeCallImportNSItem(ParseState *pstate,
+												ParseNamespaceItem *prev_nsitem,
+												List *importlist, int location);
 static ParseNamespaceItem *transformClauseBy(ParseState *pstate, Node *clause,
 											 TransformMethod transform);
 static ParseNamespaceItem *transformClauseImpl(ParseState *pstate,
@@ -2001,9 +2004,10 @@ callOidListsIntersect(List *a, List *b)
 
 /*
  * callBodyCheckExprWalker / callBodyCheckExpr
- *		A raw expression of a writing CALL body may not contain a subquery:
- *		what it reads is invisible to the commutation checks (and the
- *		Cypher-pattern subquery forms cannot even be walked generically).
+ *		Does a raw expression of a writing CALL body contain a subquery
+ *		expression?  What such an expression reads is invisible to the
+ *		commutation checks (and the Cypher-pattern subquery forms cannot even
+ *		be walked generically), so the body falls back to per-row execution.
  */
 static bool
 callBodyCheckExprWalker(Node *node, ParseState *pstate)
@@ -2017,14 +2021,10 @@ callBodyCheckExprWalker(Node *node, ParseState *pstate)
 	return raw_expression_tree_walker(node, callBodyCheckExprWalker, pstate);
 }
 
-static void
+static bool
 callBodyCheckExpr(ParseState *pstate, Node *expr, int location)
 {
-	if (callBodyCheckExprWalker(expr, pstate))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("a subquery expression is not supported in a CALL subquery body that writes yet"),
-				 parser_errposition(pstate, location)));
+	return callBodyCheckExprWalker(expr, pstate);
 }
 
 /*
@@ -2097,7 +2097,10 @@ collectMatchPropMapReads(CypherMatchClause *match, CallPropSet *props)
 typedef enum CallBodyKind
 {
 	CALL_BODY_UNIT,				/* chain ends in a write clause */
-	CALL_BODY_RETURNING			/* chain ends in RETURN, writes inside */
+	CALL_BODY_RETURNING,		/* chain ends in RETURN, writes inside */
+	CALL_BODY_PER_ROW			/* no set-based tier reproduces the per-row
+								 * semantics: execute the body once per input
+								 * row (see transformCypherCallPerRow) */
 } CallBodyKind;
 
 typedef struct CallBodyShape
@@ -2167,6 +2170,68 @@ callBodyClassify(ParseState *pstate, CypherCallClause *detail,
 			shape->kind = CALL_BODY_UNIT;
 	}
 
+	/*
+	 * Constructs no execution tier supports -- not even the per-row
+	 * fallback -- are rejected up front, so that a per-row demotion below
+	 * cannot skip their diagnosis.
+	 */
+	foreach(lc, chain)
+	{
+		CypherClause *c = lfirst(lc);
+
+		switch (cypherClauseTag(c))
+		{
+			case T_CypherProjection:
+				if (cypherProjectionKind(c->detail) == CP_FINISH)
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("FINISH is not supported in a CALL subquery body"),
+							 errhint("A body ending in a write clause already returns nothing."),
+							 parser_errposition(pstate, loc)));
+				if (cypherProjectionKind(c->detail) == CP_RETURN)
+					ereport(ERROR,
+							(errcode(ERRCODE_SYNTAX_ERROR),
+							 errmsg("RETURN must be at the end of the CALL subquery"),
+							 parser_errposition(pstate, loc)));
+				break;
+			case T_CypherLoadClause:
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("LOAD is not supported in a CALL subquery body that writes"),
+						 parser_errposition(pstate, loc)));
+				break;
+			case T_CypherCallClause:
+				if (callStmtHasWrite(((CypherCallClause *) c->detail)->subquery))
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("a CALL subquery that writes is not supported inside a CALL subquery body that writes yet"),
+							 parser_errposition(pstate, loc)));
+				break;
+			default:
+				break;
+		}
+	}
+
+	if (shape->kind == CALL_BODY_RETURNING)
+	{
+		CypherProjection *proj =
+			(CypherProjection *) shape->return_clause->detail;
+		ListCell   *li;
+
+		foreach(li, proj->items)
+		{
+			ResTarget  *rt = lfirst(li);
+
+			if (IsA(rt->val, ColumnRef) &&
+				list_length(((ColumnRef *) rt->val)->fields) == 1 &&
+				IsA(linitial(((ColumnRef *) rt->val)->fields), A_Star))
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("RETURN * is not supported in a CALL subquery body that writes"),
+						 parser_errposition(pstate, loc)));
+		}
+	}
+
 	foreach(lc, chain)
 	{
 		CypherClause *c = lfirst(lc);
@@ -2178,7 +2243,8 @@ callBodyClassify(ParseState *pstate, CypherCallClause *detail,
 					CypherMatchClause *m = (CypherMatchClause *) c->detail;
 					ListCell   *lpx;
 
-					callBodyCheckExpr(pstate, m->where, loc);
+					if (callBodyCheckExpr(pstate, m->where, loc))
+						goto per_row;
 					foreach(lpx, m->pattern)
 					{
 						CypherPath *cpx = lfirst(lpx);
@@ -2188,30 +2254,21 @@ callBodyClassify(ParseState *pstate, CypherCallClause *detail,
 						{
 							Node	   *elemx = lfirst(lex);
 
-							callBodyCheckExpr(pstate,
-											  IsA(elemx, CypherNode) ?
-											  ((CypherNode *) elemx)->prop_map :
-											  ((CypherRel *) elemx)->prop_map,
-											  loc);
+							if (callBodyCheckExpr(pstate,
+												  IsA(elemx, CypherNode) ?
+												  ((CypherNode *) elemx)->prop_map :
+												  ((CypherRel *) elemx)->prop_map,
+												  loc))
+								goto per_row;
 						}
 					}
 
 					if (seen_write)
-						ereport(ERROR,
-								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								 errmsg("a read after a write is not supported in a CALL subquery body"),
-								 errhint("Put the MATCH before the writes, or after the CALL."),
-								 parser_errposition(pstate, loc)));
+						goto per_row;
 					if (shape->lead_match != NULL)
-						ereport(ERROR,
-								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								 errmsg("only one MATCH is supported in a CALL subquery body that writes"),
-								 parser_errposition(pstate, loc)));
+						goto per_row;
 					if (m->optional)
-						ereport(ERROR,
-								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								 errmsg("OPTIONAL MATCH is not supported in a CALL subquery body that writes"),
-								 parser_errposition(pstate, loc)));
+						goto per_row;
 
 					shape->lead_match = c;
 					(void) collectReadPropsWalker(m->where, &where_reads);
@@ -2254,7 +2311,8 @@ callBodyClassify(ParseState *pstate, CypherCallClause *detail,
 							{
 								CypherSetProp *spx = lfirst(lsx);
 
-								callBodyCheckExpr(pstate, spx->expr, loc);
+								if (callBodyCheckExpr(pstate, spx->expr, loc))
+									goto per_row;
 							}
 							collectSetWrittenProps(on_set->items, &set_writes);
 						}
@@ -2275,11 +2333,7 @@ callBodyClassify(ParseState *pstate, CypherCallClause *detail,
 						if (callOidListsIntersect(match_relids,
 												  callPatternCreateRelids(pattern,
 																		  graph_oid)))
-							ereport(ERROR,
-									(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-									 errmsg("a CALL subquery body cannot create into a label its own MATCH reads"),
-									 errdetail("Each execution of the body would observe the previous executions\' creations."),
-									 parser_errposition(pstate, loc)));
+							goto per_row;
 					}
 
 					/* property reads in the created elements\' maps */
@@ -2297,7 +2351,8 @@ callBodyClassify(ParseState *pstate, CypherCallClause *detail,
 								prop_map = ((CypherNode *) elem)->prop_map;
 							else
 								prop_map = ((CypherRel *) elem)->prop_map;
-							callBodyCheckExpr(pstate, prop_map, loc);
+							if (callBodyCheckExpr(pstate, prop_map, loc))
+								goto per_row;
 							(void) collectReadPropsWalker(prop_map,
 														  &create_reads);
 						}
@@ -2325,8 +2380,9 @@ callBodyClassify(ParseState *pstate, CypherCallClause *detail,
 					{
 						CypherSetProp *sp = lfirst(li);
 
-						callBodyCheckExpr(pstate, sp->expr, loc);
-						callBodyCheckExpr(pstate, sp->prop, loc);
+						if (callBodyCheckExpr(pstate, sp->expr, loc) ||
+							callBodyCheckExpr(pstate, sp->prop, loc))
+							goto per_row;
 
 						/*
 						 * A whole-map assignment has no per-property ELSE
@@ -2358,10 +2414,7 @@ callBodyClassify(ParseState *pstate, CypherCallClause *detail,
 
 			case T_CypherDeleteClause:
 				if (shape->kind == CALL_BODY_RETURNING)
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("DELETE is not supported in a CALL subquery body that returns rows yet"),
-							 parser_errposition(pstate, loc)));
+					goto per_row;
 				have_sole_write = true;
 				all_plain_sets = false;
 				seen_write = true;
@@ -2369,58 +2422,18 @@ callBodyClassify(ParseState *pstate, CypherCallClause *detail,
 				break;
 
 			case T_CypherProjection:
-				if (cypherProjectionKind(c->detail) == CP_FINISH)
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("FINISH is not supported in a CALL subquery body"),
-							 errhint("A body ending in a write clause already returns nothing."),
-							 parser_errposition(pstate, loc)));
-				if (cypherProjectionKind(c->detail) == CP_RETURN)
-					ereport(ERROR,
-							(errcode(ERRCODE_SYNTAX_ERROR),
-							 errmsg("RETURN must be at the end of the CALL subquery"),
-							 parser_errposition(pstate, loc)));
-				ereport(ERROR,
-						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("WITH is not supported in a CALL subquery body that writes yet"),
-						 parser_errposition(pstate, loc)));
-				break;
+				/* RETURN not at the end and FINISH were rejected above */
+				goto per_row;	/* WITH */
 
 			case T_CypherCallClause:
-				ereport(ERROR,
-						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("a CALL subquery is not supported inside a CALL subquery body that writes yet"),
-						 parser_errposition(pstate, loc)));
-				break;
+				/* a nested writing CALL was rejected above */
+				goto per_row;
 
 			case T_CypherUnwindClause:
-				ereport(ERROR,
-						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("UNWIND is not supported in a CALL subquery body that writes yet"),
-						 parser_errposition(pstate, loc)));
-				break;
-
 			case T_CypherForClause:
-				ereport(ERROR,
-						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("FOR is not supported in a CALL subquery body that writes yet"),
-						 parser_errposition(pstate, loc)));
-				break;
-
-			case T_CypherLoadClause:
-				ereport(ERROR,
-						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("LOAD is not supported in a CALL subquery body that writes"),
-						 parser_errposition(pstate, loc)));
-				break;
-
 			case T_CypherModifier:
 			case T_CypherFilterClause:
-				ereport(ERROR,
-						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("ORDER BY, SKIP, LIMIT and FILTER are not supported in a CALL subquery body that writes yet"),
-						 parser_errposition(pstate, loc)));
-				break;
+				goto per_row;
 
 			default:
 				ereport(ERROR,
@@ -2437,10 +2450,7 @@ callBodyClassify(ParseState *pstate, CypherCallClause *detail,
 				 parser_errposition(pstate, loc)));
 
 	if (have_sole_write && shape->nwrites > 1)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("MERGE and DELETE must be the only write clause in a CALL subquery body"),
-				 parser_errposition(pstate, loc)));
+		goto per_row;
 
 	/*
 	 * Cross-row commutation checks: a property some write updates must not
@@ -2448,11 +2458,7 @@ callBodyClassify(ParseState *pstate, CypherCallClause *detail,
 	 * per-row execution would observe the previous rows\' updates there.
 	 */
 	if (callPropSetsIntersect(&set_writes, &propmap_reads))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("the MATCH of a CALL subquery body cannot read a property the body writes"),
-				 errdetail("Each execution of the body would observe the previous executions\' updates."),
-				 parser_errposition(pstate, loc)));
+		goto per_row;
 
 	if (callPropSetsIntersect(&set_writes, &where_reads))
 	{
@@ -2475,18 +2481,10 @@ callBodyClassify(ParseState *pstate, CypherCallClause *detail,
 			shape->accumulate = true;
 		}
 		else
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("the MATCH of a CALL subquery body that returns rows cannot read a property the body writes"),
-					 errdetail("Each execution of the body would observe the previous executions\' updates."),
-					 parser_errposition(pstate, loc)));
+			goto per_row;
 	}
 	if (callPropSetsIntersect(&set_writes, &create_reads))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("a CALL subquery body cannot create from a property the body writes"),
-				 errdetail("Each execution of the body would observe the previous executions\' updates."),
-				 parser_errposition(pstate, loc)));
+		goto per_row;
 
 	if (shape->kind == CALL_BODY_RETURNING)
 	{
@@ -2496,25 +2494,27 @@ callBodyClassify(ParseState *pstate, CypherCallClause *detail,
 
 		if (proj->distinct != NIL || proj->order != NIL ||
 			proj->skip != NULL || proj->limit != NULL)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("DISTINCT, ORDER BY, SKIP and LIMIT are not supported in the RETURN of a CALL subquery body that writes yet"),
-					 parser_errposition(pstate, loc)));
+			goto per_row;
 
 		foreach(li, proj->items)
 		{
 			ResTarget  *rt = lfirst(li);
 
-			if (IsA(rt->val, ColumnRef) &&
-				list_length(((ColumnRef *) rt->val)->fields) == 1 &&
-				IsA(linitial(((ColumnRef *) rt->val)->fields), A_Star))
-				ereport(ERROR,
-						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("RETURN * is not supported in a CALL subquery body that writes"),
-						 parser_errposition(pstate, loc)));
-			callBodyCheckExpr(pstate, rt->val, loc);
+			/* RETURN * was rejected above */
+			if (callBodyCheckExpr(pstate, rt->val, loc))
+				goto per_row;
 		}
 	}
+
+	return;
+
+	/*
+	 * No set-based tier reproduces this body's per-row semantics: run it
+	 * per input row.  The fields derived so far are irrelevant there -- the
+	 * per-row transform composes the raw body wholesale.
+	 */
+per_row:
+	shape->kind = CALL_BODY_PER_ROW;
 }
 
 /*
@@ -2740,6 +2740,613 @@ transformCallBodyWriteClause(ParseState *pstate, CypherClause *clause)
 	}
 }
 
+
+/*
+ * callCollectIterWindows / callStampIterStride
+ *		Find the range of command-id windows the composed per-row body
+ *		spans, and stamp every write Query of the body with the resulting
+ *		per-iteration stride: the number of windows ExecReScanModifyGraph
+ *		advances modify_cid by on each rescan, so that one iteration's reads
+ *		observe every previous iteration's writes and none of its own
+ *		clause's.
+ */
+static void
+callCollectIterWindows(Query *qry, uint32 *minnr, uint32 *maxnr)
+{
+	ListCell   *lc;
+
+	check_stack_depth();
+
+	if (qry->commandType == CMD_GRAPHWRITE)
+	{
+		if (qry->g_nr_modify < *minnr)
+			*minnr = qry->g_nr_modify;
+		if (qry->g_nr_modify > *maxnr)
+			*maxnr = qry->g_nr_modify;
+	}
+
+	foreach(lc, qry->rtable)
+	{
+		RangeTblEntry *rte = lfirst(lc);
+
+		if (rte->rtekind == RTE_SUBQUERY && rte->subquery != NULL)
+			callCollectIterWindows(rte->subquery, minnr, maxnr);
+	}
+}
+
+static void
+callStampIterStride(Query *qry, uint32 stride)
+{
+	ListCell   *lc;
+
+	check_stack_depth();
+
+	if (qry->commandType == CMD_GRAPHWRITE)
+	{
+		qry->g_iterStride = stride;
+
+		/*
+		 * Buffer every non-terminal write's output: a join above it inside
+		 * the body may re-read its input within one iteration, and the
+		 * replay must come from the buffer, not from running the write
+		 * again (see ExecReScanModifyGraph).
+		 */
+		if (!qry->g_last)
+			qry->g_eager = true;
+	}
+
+	foreach(lc, qry->rtable)
+	{
+		RangeTblEntry *rte = lfirst(lc);
+
+		if (rte->rtekind == RTE_SUBQUERY && rte->subquery != NULL)
+			callStampIterStride(rte->subquery, stride);
+	}
+}
+
+/*
+ * transformCypherCallSeed
+ *		The bottom of a per-row CALL body: one row carrying the imported
+ *		outer variables as ordinary named columns -- the body's clauses see
+ *		them exactly as a preceding clause's variables, readable by name and
+ *		recognized as bound elements by the write clauses -- plus one hidden
+ *		reference to the whole input row.  The references become nestloop
+ *		parameters of the CypherCall join; their change on every input row
+ *		invalidates any cached state in the body plan above (Sort, Material,
+ *		aggregation), so the whole body re-executes per row.  The hidden
+ *		whole-row reference guarantees such a parameter even for a body that
+ *		imports nothing.
+ */
+Query *
+transformCypherCallSeed(ParseState *pstate, CypherClause *clause)
+{
+	CypherCallSeed *seed = (CypherCallSeed *) clause->detail;
+	ParseState *outer;
+	Index		levelsup;
+	RangeTblEntry *rte;
+	bool		import_all = callImportIsStar(seed->importlist);
+	List	   *colnames;
+	List	   *colvars;
+	List	   *tlist = NIL;
+	Var		   *var;
+	ListCell   *lc;
+	Query	   *qry;
+
+	levelsup = 0;
+	for (outer = pstate; outer != NULL; outer = outer->parentParseState)
+	{
+		if (outer->p_call_outer_varno != 0)
+			break;
+		levelsup++;
+	}
+	if (outer == NULL)
+		elog(ERROR, "CALL subquery body seed has no outer row to reference");
+
+	rte = rt_fetch(outer->p_call_outer_varno, outer->p_rtable);
+	expandRTE(rte, outer->p_call_outer_varno, levelsup, -1, false,
+			  &colnames, &colvars);
+
+	if (import_all)
+	{
+		ListCell   *ln;
+		ListCell   *lv;
+
+		forboth(ln, colnames, lv, colvars)
+		{
+			char	   *name = strVal(lfirst(ln));
+
+			if (name[0] == '\0')
+				continue;
+			tlist = lappend(tlist,
+							makeTargetEntry((Expr *) lfirst(lv),
+											list_length(tlist) + 1,
+											pstrdup(name), false));
+		}
+	}
+	else
+	{
+		foreach(lc, seed->importlist)
+		{
+			char	   *varname = strVal(lfirst(lc));
+			ListCell   *ln;
+			ListCell   *lv;
+			Var		   *found = NULL;
+
+			forboth(ln, colnames, lv, colvars)
+			{
+				if (strcmp(strVal(lfirst(ln)), varname) == 0)
+				{
+					found = (Var *) lfirst(lv);
+					break;
+				}
+			}
+			if (found == NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_UNDEFINED_COLUMN),
+						 errmsg("variable \"%s\" to import into CALL does not exist",
+								varname),
+						 parser_errposition(pstate, seed->location)));
+			if (findTarget(tlist, varname) != NULL)
+				continue;		/* import named twice */
+			tlist = lappend(tlist,
+							makeTargetEntry((Expr *) found,
+											list_length(tlist) + 1,
+											pstrdup(varname), false));
+		}
+	}
+
+	/*
+	 * The hidden per-row reference: an always-true filter over the whole
+	 * input row.  It lives in the quals -- an unreferenced output column
+	 * would be stripped as unused (remove_unused_subquery_outputs), while a
+	 * qual survives planning verbatim and stays at the bottom of the body
+	 * plan through any flattening.  num_nulls() is never NULL, so the
+	 * filter passes every row (including one whose imported columns are
+	 * NULL), and its parameter argument keeps it from being folded away.
+	 */
+	var = makeWholeRowVar(rte, outer->p_call_outer_varno, levelsup, false);
+	{
+		FuncExpr   *fn;
+		NullTest   *nt;
+
+		fn = makeFuncExpr(F_NUM_NULLS, INT4OID, list_make1(var),
+						  InvalidOid, InvalidOid, COERCE_EXPLICIT_CALL);
+		nt = makeNode(NullTest);
+		nt->arg = (Expr *) fn;
+		nt->nulltesttype = IS_NOT_NULL;
+		nt->argisrow = false;
+		nt->location = -1;
+
+		qry = makeNode(Query);
+		qry->commandType = CMD_SELECT;
+		qry->targetList = tlist;
+		qry->jointree = makeFromExpr(NIL, (Node *) nt);
+	}
+
+	/*
+	 * LIMIT 1: a no-op on this one-row query, but it keeps the seed from
+	 * being flattened into the clause above.  Flattened, the filter above
+	 * becomes a gating qual of that clause's join tree and the planner
+	 * wraps the join in a Result node -- under a MERGE, whose executor
+	 * reads its match state directly off the join node, that changes the
+	 * plan shape it relies on.
+	 */
+	qry->limitCount = (Node *) makeConst(INT8OID, -1, InvalidOid,
+										 sizeof(int64), Int64GetDatum(1),
+										 false, FLOAT8PASSBYVAL);
+	qry->limitOption = LIMIT_OPTION_COUNT;
+
+	return qry;
+}
+
+/*
+ * transformCypherCallPerRow
+ *		Execute a writing CALL body once per input row.
+ *
+ *		This is the fallback for every body whose per-row semantics no
+ *		set-based tier reproduces (callBodyClassify demoted it): the body
+ *		becomes a self-contained lateral subquery seeded with a reference to
+ *		the input row (see transformCypherCallSeed) and is joined to the
+ *		input with JOIN_CYPHER_CALL, which the planner turns into a plain
+ *		parameterized nestloop -- the in-engine Apply loop MERGE already
+ *		uses.  On each input row the nestloop rescans the body; rescanning a
+ *		ModifyGraph re-bases its command-id window above all previous
+ *		iterations' writes (ExecReScanModifyGraph), which is exactly
+ *		openCypher's CALL semantics: each execution of the body observes its
+ *		predecessors' writes but not its own reads-then-writes.
+ *
+ *		A unit body ends in its terminal write (stamped g_last, so it emits
+ *		no rows) and the join's LEFT-like null extension passes each input
+ *		row through exactly once.  A returning body streams its RETURN rows;
+ *		a hidden always-true gate column filters the null-extended row of an
+ *		iteration that returned nothing.
+ *
+ *		The statement-level label-disjointness check
+ *		(callValidateIteratedBodies) rejects the statements this
+ *		composition would execute differently from Neo4j: a body whose
+ *		writes surface to the statement's other clauses part-way through.
+ */
+static Query *
+transformCypherCallPerRow(ParseState *pstate, CypherClause *clause)
+{
+	CypherCallClause *detail = (CypherCallClause *) clause->detail;
+	bool		terminal = (pstate->parentParseState == NULL);
+	bool		synthetic_input = (clause->prev == NULL);
+	bool		returning;
+	Query	   *qry;
+	Query	   *bodyqry;
+	CypherStmt *bodyCopy;
+	CypherClause *head;
+	CypherClause *seed_clause;
+	CypherCallSeed *seed;
+	ParseNamespaceItem *prev_nsitem;
+	ParseNamespaceItem *body_nsitem;
+	ParseNamespaceItem *join_nsitem;
+	ParseState *childParseState;
+	List	   *saved_namespace;
+	Index		saved_outer_varno;
+	int			l_count;
+	uint32		minnr;
+	uint32		maxnr;
+	List	   *colnames;
+	List	   *colvars;
+	Node	   *qual = NULL;
+	List	   *tlist = NIL;
+	ListCell   *ln;
+	ListCell   *lv;
+	int			pos;
+
+	/* the input rows: the previous clause, or a single synthetic row */
+	if (!synthetic_input)
+		prev_nsitem = transformClause(pstate, clause->prev);
+	else
+	{
+		Query	   *onerow = makeNode(Query);
+
+		onerow->commandType = CMD_SELECT;
+		onerow->jointree = makeFromExpr(NIL, NULL);
+
+		prev_nsitem =
+			addRangeTableEntryForSubquery(pstate, onerow,
+										  makeAliasNoDup(CYPHER_SUBQUERY_ALIAS, NIL),
+										  false, true);
+		addNSItemToJoinlist(pstate, prev_nsitem, false);
+	}
+
+	/* copy the body and chain it behind its seed */
+	bodyCopy = copyObject((CypherStmt *) detail->subquery);
+
+	seed = makeNode(CypherCallSeed);
+	seed->importlist = copyObject(detail->importlist);
+	seed->location = detail->location;
+	seed_clause = makeNode(CypherClause);
+	seed_clause->detail = (Node *) seed;
+
+	head = (CypherClause *) bodyCopy->last;
+	while (head->prev != NULL)
+		head = (CypherClause *) head->prev;
+	head->prev = (Node *) seed_clause;
+
+	/*
+	 * Analyze the body in a child ParseState.  Only the imported variables
+	 * are visible inside, as columns of the seed; the seed finds the
+	 * input-row RTE through p_call_outer_varno.  The body's write clauses
+	 * take command-id windows above the preceding clauses' and leave the
+	 * counter raised for the clauses that follow the CALL.  Going through
+	 * the statement transform gives the body the ordinary statement-level
+	 * preprocessing (standalone ORDER BY / SKIP / LIMIT folding).
+	 */
+	saved_namespace = pstate->p_namespace;
+	pstate->p_namespace = NIL;
+
+	saved_outer_varno = pstate->p_call_outer_varno;
+	pstate->p_call_outer_varno = prev_nsitem->p_rtindex;
+
+	Assert(pstate->p_expr_kind == EXPR_KIND_NONE);
+	pstate->p_expr_kind = EXPR_KIND_FROM_SUBSELECT;
+	pstate->p_lateral_active = true;
+
+	childParseState = make_parsestate(pstate);
+	childParseState->p_nr_modify_clause = pstate->p_nr_modify_clause;
+
+	bodyqry = transformStmt(childParseState, (Node *) bodyCopy);
+
+	if (childParseState->p_nr_modify_clause > 0)
+		pstate->p_nr_modify_clause = childParseState->p_nr_modify_clause;
+
+	free_parsestate(childParseState);
+
+	pstate->p_lateral_active = false;
+	pstate->p_expr_kind = EXPR_KIND_NONE;
+	pstate->p_namespace = saved_namespace;
+	pstate->p_call_outer_varno = saved_outer_varno;
+
+	/* a write-terminated body transforms to a graph-write Query */
+	returning = (bodyqry->commandType == CMD_SELECT);
+
+	if (returning)
+	{
+		ListCell   *lt;
+
+		/*
+		 * As in the read path: a returned variable may not shadow an outer
+		 * one for the clauses that follow the CALL.
+		 */
+		foreach(lt, bodyqry->targetList)
+		{
+			TargetEntry *te = (TargetEntry *) lfirst(lt);
+			ListCell   *lo;
+
+			if (te->resjunk || te->resname == NULL || te->resname[0] == '\0')
+				continue;
+			foreach(lo, prev_nsitem->p_rte->eref->colnames)
+			{
+				const char *outer_name = strVal(lfirst(lo));
+
+				if (outer_name[0] != '\0' &&
+					strcmp(te->resname, outer_name) == 0)
+					ereport(ERROR,
+							(errcode(ERRCODE_DUPLICATE_ALIAS),
+							 errmsg("variable \"%s\" returned by the CALL subquery is already bound in the outer query",
+									te->resname),
+							 parser_errposition(pstate, detail->location)));
+			}
+		}
+
+		/*
+		 * The gate: TRUE on every row the body returned, NULL on the join's
+		 * null-extended row for an iteration that returned nothing -- which
+		 * must not come out (a returning CALL joins input x body rows).
+		 */
+		bodyqry->targetList =
+			lappend(bodyqry->targetList,
+					makeTargetEntry((Expr *) makeBoolConst(true, false),
+									list_length(bodyqry->targetList) + 1,
+									pstrdup(""), false));
+	}
+	else
+	{
+		if (bodyqry->commandType != CMD_GRAPHWRITE)
+			elog(ERROR, "unexpected command in CALL subquery body");
+
+		/*
+		 * A unit body discards its rows: its terminal write swallows them
+		 * exactly like an inlined terminal write, and the join's null
+		 * extension passes the input row through exactly once.  The write
+		 * was transformed at a nested level and so assumed a consumer above
+		 * (g_last unset, and a SET/DELETE made eager for it); undo both.
+		 */
+		bodyqry->g_last = true;
+		bodyqry->g_eager = false;
+	}
+
+	body_nsitem =
+		addRangeTableEntryForSubquery(pstate, bodyqry,
+									  makeAliasNoDup(CYPHER_CALL_ALIAS, NIL),
+									  true, true);
+
+	if (!returning)
+	{
+		/*
+		 * Hide the unit body's columns: they end at this CALL, and a body
+		 * variable that happens to share an outer variable's name must not
+		 * be column-merged by the join below.
+		 */
+		foreach(ln, body_nsitem->p_rte->eref->colnames)
+			lfirst(ln) = makeString(pstrdup(""));
+	}
+
+	join_nsitem = incrementalJoinRTEs(pstate, JOIN_CYPHER_CALL,
+									  prev_nsitem, body_nsitem,
+									  makeBoolConst(true, false),
+									  makeAliasNoDup(CYPHER_SUBQUERY_ALIAS, NIL));
+
+	/*
+	 * Project the input columns through unchanged and, for a returning
+	 * body, the body's RETURN columns after them; the hidden columns (the
+	 * seed carry and the gate) end here.
+	 */
+	l_count = list_length(prev_nsitem->p_rte->eref->colnames);
+
+	expandRTE(join_nsitem->p_rte, join_nsitem->p_rtindex, 0, -1, false,
+			  &colnames, &colvars);
+
+	if (returning)
+	{
+		Var		   *gate_var = (Var *) llast(colvars);
+
+		Assert(exprType((Node *) gate_var) == BOOLOID);
+		qual = (Node *) gate_var;
+	}
+
+	pos = 0;
+	forboth(ln, colnames, lv, colvars)
+	{
+		char	   *name = strVal(lfirst(ln));
+
+		pos++;
+		if (name[0] == '\0')
+			continue;
+		if (pos > l_count && !returning)
+			continue;
+
+		tlist = lappend(tlist,
+						makeTargetEntry((Expr *) lfirst(lv),
+										list_length(tlist) + 1,
+										pstrdup(name), false));
+	}
+
+	qry = makeNode(Query);
+
+	/*
+	 * When the statement ends with this CALL it behaves like an inlined
+	 * terminal write: no rows come out and the graph-write completion tag is
+	 * reported.  With no write of its own (g_writeOp stays GWROP_NONE) the
+	 * planner adds no ModifyGraph on top; the join's rows are discarded.
+	 */
+	qry->commandType = terminal ? CMD_GRAPHWRITE : CMD_SELECT;
+	qry->targetList = tlist;
+	qry->rtable = pstate->p_rtable;
+	qry->jointree = makeFromExpr(pstate->p_joinlist, qual);
+	qry->rteperminfos = pstate->p_rteperminfos;
+	qry->hasSubLinks = pstate->p_hasSubLinks;
+	qry->hasTargetSRFs = pstate->p_hasTargetSRFs;
+	qry->hasGraphwriteClause = true;
+	pstate->p_hasGraphwriteClause = true;
+
+	/* per-iteration command-id stride (see ExecReScanModifyGraph) */
+	minnr = PG_UINT32_MAX;
+	maxnr = 0;
+	callCollectIterWindows(bodyqry, &minnr, &maxnr);
+	Assert(minnr <= maxnr);
+	callStampIterStride(bodyqry, maxnr - minnr + 1);
+
+	/*
+	 * Record the body for the whole-statement disjointness check; the list
+	 * bubbles up to the statement level through transformClauseImpl.
+	 */
+	bodyqry->stmt_location = detail->location;
+	pstate->p_iterated_calls = lappend(pstate->p_iterated_calls, bodyqry);
+
+	assign_query_collations(pstate, qry);
+
+	return qry;
+}
+
+/*
+ * callValidateIteratedBodies
+ *		The whole-statement check backing transformCypherCallPerRow: a
+ *		per-row body's writes surface between its iterations, so a label the
+ *		body writes may not be read anywhere else in the statement (the
+ *		other clauses would observe the writes part-way through: growing
+ *		inputs, half-stale trailing reads), and a label the body reads may
+ *		not be written anywhere else (an iteration would observe a
+ *		following clause's writes for the rows already processed).  Bodies
+ *		the set-based tiers execute are not affected -- their commutation
+ *		with the rest of the statement is what admitted them there.
+ */
+typedef struct IterBodyCheckContext
+{
+	Query	   *body;			/* the per-row body being checked */
+	bool		in_body;
+	List	   *body_reads;		/* label relations the body scans */
+	List	   *body_writes;	/* label relations the body modifies */
+	List	   *outer_reads;	/* ... the rest of the statement scans */
+	List	   *outer_writes;	/* ... the rest of the statement modifies */
+} IterBodyCheckContext;
+
+static bool
+iterBodyCollectWalker(Node *node, IterBodyCheckContext *ctx)
+{
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, Query))
+	{
+		Query	   *q = (Query *) node;
+		bool		saved = ctx->in_body;
+		Bitmapset  *result_rtis = NULL;
+		ListCell   *lc;
+		int			rti;
+		bool		ret;
+
+		if (q == ctx->body)
+			ctx->in_body = true;
+
+		foreach(lc, q->g_resultRelations)
+			result_rtis = bms_add_member(result_rtis, lfirst_int(lc));
+
+		rti = 0;
+		foreach(lc, q->rtable)
+		{
+			RangeTblEntry *rte = lfirst(lc);
+			List	  **dest;
+
+			rti++;
+			if (rte->rtekind != RTE_RELATION)
+				continue;
+
+			if (bms_is_member(rti, result_rtis))
+				dest = ctx->in_body ? &ctx->body_writes : &ctx->outer_writes;
+			else
+				dest = ctx->in_body ? &ctx->body_reads : &ctx->outer_reads;
+			*dest = lappend_oid(*dest, rte->relid);
+		}
+		bms_free(result_rtis);
+
+		ret = query_tree_walker(q, iterBodyCollectWalker, ctx, 0);
+		ctx->in_body = saved;
+		return ret;
+	}
+
+	return expression_tree_walker(node, iterBodyCollectWalker, ctx);
+}
+
+/*
+ * Does some write target fall inside some read's inheritance closure?  (A
+ * scan of a label also reads its sub-labels.)
+ */
+static bool
+iterRelidsConflict(List *writes, List *reads)
+{
+	ListCell   *lr;
+
+	foreach(lr, reads)
+	{
+		List	   *closure = find_all_inheritors(lfirst_oid(lr),
+												  AccessShareLock, NULL);
+		ListCell   *lw;
+		bool		hit = false;
+
+		foreach(lw, writes)
+		{
+			if (list_member_oid(closure, lfirst_oid(lw)))
+			{
+				hit = true;
+				break;
+			}
+		}
+		list_free(closure);
+		if (hit)
+			return true;
+	}
+
+	return false;
+}
+
+void
+callValidateIteratedBodies(ParseState *pstate, Query *qry)
+{
+	ListCell   *lc;
+
+	foreach(lc, pstate->p_iterated_calls)
+	{
+		Query	   *body = (Query *) lfirst(lc);
+		IterBodyCheckContext ctx;
+
+		memset(&ctx, 0, sizeof(ctx));
+		ctx.body = body;
+
+		(void) iterBodyCollectWalker((Node *) qry, &ctx);
+
+		if (iterRelidsConflict(ctx.body_writes, ctx.outer_reads))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("this CALL subquery body writes a label the rest of the statement reads"),
+					 errdetail("The body runs once per input row, so the statement's other clauses would observe its writes part-way through."),
+					 errhint("Split the statement, or move the reading clauses into the body."),
+					 parser_errposition(pstate, body->stmt_location)));
+
+		if (iterRelidsConflict(ctx.outer_writes, ctx.body_reads))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("this CALL subquery body reads a label the rest of the statement writes"),
+					 errdetail("The body runs once per input row, so it would observe the statement's other writes part-way through."),
+					 errhint("Split the statement."),
+					 parser_errposition(pstate, body->stmt_location)));
+	}
+}
+
 /*
  * transformCypherCallWriteBody
  *		The write path of transformCypherCallClause: classify the body,
@@ -2786,6 +3393,10 @@ transformCypherCallWriteBody(ParseState *pstate, CypherClause *clause)
 				 parser_errposition(pstate, detail->location)));
 
 	callBodyClassify(pstate, detail, &shape);
+
+	/* no set-based tier reproduces this body: execute it per input row */
+	if (shape.kind == CALL_BODY_PER_ROW)
+		return transformCypherCallPerRow(pstate, clause);
 
 	/* transformCypherStmt only admits a unit write body as a terminator */
 	Assert(!terminal || shape.kind == CALL_BODY_UNIT);
@@ -2884,11 +3495,14 @@ transformCypherCallWriteBody(ParseState *pstate, CypherClause *clause)
 			gate_var = callLeadMatchGateVar((CypherMatchClause *) shape.lead_match->detail,
 											detail->importlist);
 			if (gate_var == NULL)
-				ereport(ERROR,
-						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("the MATCH of a CALL subquery body must bind at least one named new variable"),
-						 errhint("Name a node or relationship of the pattern; it indicates for each row whether the pattern matched."),
-						 parser_errposition(pstate, detail->location)));
+			{
+				/*
+				 * No pattern variable can gate the writes set-based; run
+				 * the body per row instead.
+				 */
+				pstate->p_call_accumulate_sets = false;
+				return transformCypherCallPerRow(pstate, clause);
+			}
 
 			boundary->add_rowid = true;
 
@@ -8419,6 +9033,38 @@ find_target_label_walker(Node *node, find_target_label_context *ctx)
 		RangeTblEntry *rte;
 
 		/*
+		 * A variable referencing a query level outside this clause's own
+		 * chain: an element imported into a per-row CALL body arrives this
+		 * way, through the body seed's reference to the input row.  Its
+		 * label cannot be traced from here; register the element type's
+		 * whole label hierarchy instead, exactly as for an unlabeled
+		 * variable (whose scan is the hierarchy root).
+		 */
+		if (var->varlevelsup > 0)
+		{
+			const char *rootname;
+			Oid			laboid;
+			Oid			relid;
+
+			if (var->vartype == VERTEXOID)
+				rootname = AG_VERTEX;
+			else if (var->vartype == EDGEOID)
+				rootname = AG_EDGE;
+			else
+				return false;
+
+			laboid = get_labname_laboid(rootname, get_graph_path_oid());
+			if (!OidIsValid(laboid))
+				return false;
+			relid = get_laboid_relid(laboid);
+			if (!OidIsValid(relid))
+				return false;
+
+			ctx->relid = relid;
+			return true;
+		}
+
+		/*
 		 * NOTE: This is related to how `ModifyGraph` does SET, and
 		 * `FVR_PRESERVE_VAR_REF` flag. We need to fix this.
 		 */
@@ -8994,6 +9640,7 @@ transformClauseImpl(ParseState *pstate, Node *clause,
 	childParseState->p_is_optional_match = pstate->p_is_optional_match;
 	childParseState->p_valid_labels = pstate->p_valid_labels;
 	childParseState->p_call_accumulate_sets = pstate->p_call_accumulate_sets;
+	childParseState->p_nr_modify_clause = pstate->p_nr_modify_clause;
 
 	qry = transform(childParseState, clause);
 
@@ -9003,6 +9650,8 @@ transformClauseImpl(ParseState *pstate, Node *clause,
 		pstate->p_nr_modify_clause = childParseState->p_nr_modify_clause;
 	pstate->p_delete_edges_resname = childParseState->p_delete_edges_resname;
 	pstate->p_hasGraphwriteClause = childParseState->p_hasGraphwriteClause;
+	pstate->p_iterated_calls = list_concat(pstate->p_iterated_calls,
+										   childParseState->p_iterated_calls);
 	pstate->p_valid_labels = childParseState->p_valid_labels;
 
 	mark_nodes_as_nonlocal(childParseState->p_entity_info_list);

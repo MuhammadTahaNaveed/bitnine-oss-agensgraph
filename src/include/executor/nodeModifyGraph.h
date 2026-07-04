@@ -18,6 +18,8 @@ extern ModifyGraphState *ExecInitModifyGraph(ModifyGraph *mgplan,
 											 EState *estate, int eflags);
 extern void ExecEndModifyGraph(ModifyGraphState *mgstate);
 extern void ExecPredrainGraphWriters(PlanState *planstate);
+extern void ExecReScanModifyGraph(ModifyGraphState *mgstate);
+extern void ExecCypherCallBeginIteration(PlanState *body);
 
 /* for visibility between Cypher clauses */
 typedef enum ModifyCid

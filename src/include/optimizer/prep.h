@@ -21,6 +21,7 @@
 /*
  * prototypes for prepjointree.c
  */
+extern bool jointree_has_cyphercall_join(Node *jtnode);
 extern void transform_MERGE_to_join(Query *parse);
 extern void replace_empty_jointree(Query *parse);
 extern void pull_up_sublinks(PlannerInfo *root);

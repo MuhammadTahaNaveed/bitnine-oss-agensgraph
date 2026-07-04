@@ -65,6 +65,7 @@
 #include "nodes/pathnodes.h"
 #include "utils/syscache.h"
 #include "executor/execGraphVle.h"
+#include "executor/nodeModifyGraph.h"
 
 static bool IndexSupportsBackwardScan(Oid indexid);
 
@@ -315,6 +316,10 @@ ExecReScan(PlanState *node)
 
 		case T_GraphVLEState:
 			ExecReScanGraphVLE((GraphVLEState *) node);
+			break;
+
+		case T_ModifyGraphState:
+			ExecReScanModifyGraph((ModifyGraphState *) node);
 			break;
 
 		default:
