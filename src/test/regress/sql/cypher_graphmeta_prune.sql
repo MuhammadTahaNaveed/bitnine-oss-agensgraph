@@ -1157,6 +1157,42 @@ EXECUTE idq('4.1'::graphid);
 DEALLOCATE idq;
 SET plan_cache_mode = auto;
 
+-- ============================================================
+-- endpoint elision: an anonymous, unlabelled, unconstrained MATCH endpoint
+-- contributes only an existence check that an edge's referential integrity
+-- already guarantees, so it is not scanned as a vertex at all -- its range
+-- table entry and join are skipped, leaving the edge's start/end graphid to
+-- stand alone.  Only a degree-1 terminal endpoint of a plain (non-path,
+-- non-VLE) pattern qualifies.
+-- ============================================================
+
+-- trailing () elided: knows is scanned for the edge and person for `a`, but the
+-- discarded endpoint vertex is never resolved
+EXPLAIN (costs off) MATCH (a:person)-[:knows]->() RETURN a;
+MATCH (a:person)-[:knows]->() RETURN label(a) AS l, id(a) AS id;
+
+-- leading () elided, trailing labelled endpoint still resolved
+EXPLAIN (costs off) MATCH ()-[:knows]->(b:city) RETURN b;
+MATCH ()-[:knows]->(b:city) RETURN label(b) AS l, id(b) AS id;
+
+-- both endpoints anonymous: the pattern collapses to the edge scan alone
+EXPLAIN (costs off) MATCH ()-[:knows]->() RETURN count(*) AS n;
+MATCH ()-[:knows]->() RETURN count(*) AS n;
+
+-- SOUNDNESS: a named endpoint is materialized (its row may be referenced)
+EXPLAIN (costs off) MATCH (a:person)-[:knows]->(b) RETURN b;
+-- SOUNDNESS: a labelled endpoint is a filter, never elided
+EXPLAIN (costs off) MATCH (a:person)-[:knows]->(:city) RETURN a;
+MATCH (a:person)-[:knows]->(:city) RETURN count(*) AS n;
+-- contradicting endpoint label still filters to 0 rows (city is not an employee)
+MATCH (a:person)-[:knows]->(:employee) RETURN count(*) AS n;
+-- SOUNDNESS: a property-constrained anonymous endpoint is not elided (0 rows)
+MATCH (a:person)-[:knows]->({dummy:1}) RETURN count(*) AS n;
+-- SOUNDNESS: an intermediate anonymous node ties two edges and is not elided
+EXPLAIN (costs off) MATCH (a:person)-[:knows]->()-[:knows]->(c) RETURN c;
+-- SOUNDNESS: a named path keeps every endpoint (needed for the path array)
+EXPLAIN (costs off) MATCH p = (a:person)-[:knows]->() RETURN p;
+
 SET auto_gather_graphmeta = false;
 DROP GRAPH gmp20 CASCADE;
 SET auto_gather_graphmeta = true;

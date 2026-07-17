@@ -2691,6 +2691,31 @@ recordGraphmetaEdge(Node *edge, bool edge_is_nsitem, CypherRel *crel,
 		rte->graphPruneRole = GRAPHPRUNE_ROLE_DIR_EDGE;
 }
 
+/*
+ * isElidableEndpointNode
+ *		True when a pattern endpoint node need not be materialized as a vertex
+ *		scan at all, so its range-table entry and join can be skipped.
+ *
+ * Such a node is anonymous (no variable, so nothing downstream can reference
+ * it), unlabelled (its join to the ag_vertex parent is a pure existence check,
+ * never a label filter), and free of any inline property constraint (nothing
+ * about the vertex need be read to qualify the match).  Because an edge's
+ * endpoint always references a live vertex by construction, that existence
+ * check is redundant: the edge's start/end graphid already stands on its own,
+ * so the whole per-edge vertex lookup is wasted work.
+ *
+ * The caller applies this only to a degree-1 terminal endpoint of a plain
+ * pattern -- never a named path, a shortestpath, or a VLE edge, and never an
+ * intermediate node, which still carries edge-to-edge continuity.
+ */
+static bool
+isElidableEndpointNode(CypherNode *cnode)
+{
+	return (getCypherName(cnode->variable) == NULL &&
+			getCypherName(cnode->label) == NULL &&
+			cnode->prop_map == NULL);
+}
+
 static Node *
 transformComponents(ParseState *pstate, List *components, List **targetList)
 {
@@ -2783,11 +2808,22 @@ transformComponents(ParseState *pstate, List *components, List **targetList)
 					crel = lfirst(le);
 
 					/*
-					 * if `crel` is zero-length VLE, get RTE of `cnode`
-					 * because `crel` needs `id` column of the RTE
+					 * A leading anonymous, unlabelled, unconstrained endpoint
+					 * of a plain (non-VLE) pattern contributes only an
+					 * existence check that referential integrity already
+					 * guarantees, so skip its vertex scan; the edge's start
+					 * graphid stands on its own.  Otherwise transform the node
+					 * normally -- a zero-length VLE, for one, needs its `id`.
 					 */
-					vertex = transformMatchNode(pstate, cnode, targetList,
-												&eqoList, &vertex_is_nsitem);
+					if (!out && crel->varlen == NULL &&
+						isElidableEndpointNode(cnode))
+					{
+						vertex = NULL;
+						vertex_is_nsitem = false;
+					}
+					else
+						vertex = transformMatchNode(pstate, cnode, targetList,
+													&eqoList, &vertex_is_nsitem);
 
 					if (p->kind != CPATH_NORMAL)
 					{
@@ -2816,8 +2852,24 @@ transformComponents(ParseState *pstate, List *components, List **targetList)
 				}
 				else
 				{
-					vertex = transformMatchNode(pstate, cnode, targetList,
-												&eqoList, &vertex_is_nsitem);
+					/*
+					 * A trailing anonymous, unlabelled, unconstrained endpoint
+					 * of a plain (non-VLE) pattern is elidable for the same
+					 * reason as a leading one: skip its vertex scan and leave
+					 * the incoming edge's endpoint graphid unconstrained.  Only
+					 * the final node of the chain qualifies; an intermediate
+					 * node still ties two edges together.
+					 */
+					if (!out && prev_crel->varlen == NULL &&
+						lnext(p->chain, le) == NULL &&
+						isElidableEndpointNode(cnode))
+					{
+						vertex = NULL;
+						vertex_is_nsitem = false;
+					}
+					else
+						vertex = transformMatchNode(pstate, cnode, targetList,
+													&eqoList, &vertex_is_nsitem);
 
 					/*
 					 * graphmeta: record this node, then complete
