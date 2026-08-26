@@ -10843,6 +10843,23 @@ get_pathelem_expr(Node *node, deparse_context *context, bool showimplicit)
 
 	if (!context->cypherexpr)
 	{
+		/*
+		 * Outside a Cypher expression the key is written as the quoted name a
+		 * dot takes here, and nothing more.  Written as the expression it is,
+		 * the type label it carries would read back as a cast of the whole
+		 * access, which returns the key's value as text rather than as the
+		 * value it is.  A key is always a text constant, so the name is the
+		 * whole of it; anything else is written as it stands.
+		 */
+		if (IsA(node, Const) &&
+			((Const *) node)->consttype == TEXTOID &&
+			!((Const *) node)->constisnull)
+		{
+			simple_quote_literal(context->buf,
+								 TextDatumGetCString(((Const *) node)->constvalue));
+			return;
+		}
+
 		get_rule_expr(node, context, showimplicit);
 		return;
 	}

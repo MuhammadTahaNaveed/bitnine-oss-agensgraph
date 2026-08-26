@@ -17267,6 +17267,17 @@ indirection_el:
 				{
 					$$ = (Node *) makeString($2);
 				}
+			| '.' Sconst
+				{
+					/*
+					 * A quoted name after a dot reads a property of a map, the
+					 * way a Cypher clause reads one.  It is how a stored graph
+					 * expression is written out, so that what a view definition
+					 * prints can be read back; an unquoted name here selects a
+					 * field of a composite, which a map has none of.
+					 */
+					$$ = makeStringConst($2, @2);
+				}
 			| '.' '*'
 				{
 					$$ = (Node *) makeNode(A_Star);
@@ -23154,7 +23165,12 @@ makeColumnRef(char *colname, List *indirection,
 	c->location = location;
 	foreach(l, indirection)
 	{
-		if (IsA(lfirst(l), A_Indices))
+		/*
+		 * A property key ends the name as a subscript does: what precedes it
+		 * names the value the key is read from, and the key itself is read by
+		 * the indirection rather than being part of the name.
+		 */
+		if (IsA(lfirst(l), A_Indices) || IsA(lfirst(l), A_Const))
 		{
 			A_Indirection *i = makeNode(A_Indirection);
 

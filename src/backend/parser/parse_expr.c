@@ -16,6 +16,7 @@
 #include "postgres.h"
 
 #include "catalog/pg_aggregate.h"
+#include "catalog/pg_collation.h"
 #include "catalog/pg_type.h"
 #include "commands/dbcommands.h"
 #include "miscadmin.h"
@@ -40,6 +41,7 @@
 #include "utils/timestamp.h"
 #include "utils/xml.h"
 #include "parser/parse_cypher_expr.h"
+#include "parser/parse_cypher_utils.h"
 
 /* GUC parameters */
 bool		Transform_null_equals = false;
@@ -439,12 +441,45 @@ unknown_attribute(ParseState *pstate, Node *relref, const char *attname,
 	}
 }
 
+/*
+ * flushPropertyKeys
+ *		Read the property keys gathered so far as one access of the map they
+ *		are keys of, and return what that reads.  Returns the expression
+ *		unchanged when no key is waiting.
+ */
+static Node *
+flushPropertyKeys(ParseState *pstate, Node *expr, List **keys, int location)
+{
+	List	   *path = NIL;
+	ListCell   *lk;
+
+	if (*keys == NIL)
+		return expr;
+
+	expr = filterAccessArg(pstate, expr, location, "map");
+
+	foreach(lk, *keys)
+	{
+		A_Const    *key = lfirst(lk);
+
+		path = lappend(path,
+					   makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1,
+								 CStringGetTextDatum(strVal(&key->val)),
+								 false, false));
+	}
+
+	*keys = NIL;
+
+	return makeJsonbFuncAccessor(pstate, expr, path);
+}
+
 static Node *
 transformIndirection(ParseState *pstate, A_Indirection *ind)
 {
 	Node	   *last_srf = pstate->p_last_srf;
 	Node	   *result = transformExprRecurse(pstate, ind->arg);
 	List	   *subscripts = NIL;
+	List	   *propkeys = NIL;
 	int			location = exprLocation(result);
 	ListCell   *i;
 
@@ -458,7 +493,10 @@ transformIndirection(ParseState *pstate, A_Indirection *ind)
 		Node	   *n = lfirst(i);
 
 		if (IsA(n, A_Indices))
+		{
+			result = flushPropertyKeys(pstate, result, &propkeys, location);
 			subscripts = lappend(subscripts, n);
+		}
 		else if (IsA(n, A_Star))
 		{
 			ereport(ERROR,
@@ -466,11 +504,34 @@ transformIndirection(ParseState *pstate, A_Indirection *ind)
 					 errmsg("row expansion via \"*\" is not supported here"),
 					 parser_errposition(pstate, location)));
 		}
+		else if (IsA(n, A_Const))
+		{
+			/*
+			 * A quoted name after a dot reads a property of a map.  The keys
+			 * that follow one another are read by a single access, the way a
+			 * Cypher clause reads "n.a.b", so that a definition written out
+			 * and read back holds the expression it held before.
+			 */
+			A_Const    *key = (A_Const *) n;
+
+			if (subscripts)
+				result = (Node *) transformContainerSubscripts(pstate,
+															  result,
+															  exprType(result),
+															  exprTypmod(result),
+															  subscripts,
+															  false);
+			subscripts = NIL;
+
+			propkeys = lappend(propkeys, key);
+		}
 		else
 		{
 			Node	   *newresult;
 
 			Assert(IsA(n, String));
+
+			result = flushPropertyKeys(pstate, result, &propkeys, location);
 
 			/* process subscripts before this field selection */
 			if (subscripts)
@@ -494,6 +555,10 @@ transformIndirection(ParseState *pstate, A_Indirection *ind)
 			result = newresult;
 		}
 	}
+
+	/* process trailing property keys, if any */
+	result = flushPropertyKeys(pstate, result, &propkeys, location);
+
 	/* process trailing subscripts, if any */
 	if (subscripts)
 		result = (Node *) transformContainerSubscripts(pstate,
